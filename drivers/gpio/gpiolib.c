@@ -214,8 +214,8 @@ static int gpio_ensure_requested(struct gpio_desc *desc)
 			return -EIO;
 		}
 		desc_set_label(desc, "[auto]");
-		/* caller must chip->request() w/o spinlock */
-		if (chip->request)
+		/* caller must chip->ops->request() w/o spinlock */
+		if (chip->ops->request)
 			return 1;
 	}
 	return 0;
@@ -272,10 +272,10 @@ int gpiod_get_direction(const struct gpio_desc *desc)
 	chip = gpiod_to_chip(desc);
 	offset = gpio_chip_hwgpio(desc);
 
-	if (!chip->get_direction)
+	if (!chip->ops->get_direction)
 		return status;
 
-	status = chip->get_direction(chip, offset);
+	status = chip->ops->get_direction(chip, offset);
 	if (status > 0) {
 		/* GPIOF_DIR_IN, or other positive */
 		status = 1;
@@ -837,7 +837,7 @@ int gpiod_export(struct gpio_desc *desc, bool direction_may_change)
 		goto fail_unlock;
 	}
 
-	if (!desc->chip->direction_input || !desc->chip->direction_output)
+	if (!desc->chip->ops->direction_input || !desc->chip->ops->direction_output)
 		direction_may_change = false;
 	spin_unlock_irqrestore(&gpio_lock, flags);
 
@@ -1212,10 +1212,10 @@ int gpiochip_add(struct gpio_chip *chip)
 			 * inputs (often with pullups enabled) so power
 			 * usage is minimized.  Linux code should set the
 			 * gpio direction first thing; but until it does,
-			 * and in case chip->get_direction is not set,
+			 * and in case chip->ops->get_direction is not set,
 			 * we may expose the wrong direction in sysfs.
 			 */
-			desc->flags = !chip->direction_input
+			desc->flags = !chip->ops->direction_input
 				? (1 << FLAG_IS_OUT)
 				: 0;
 		}
@@ -1704,10 +1704,10 @@ static int __gpiod_request(struct gpio_desc *desc, const char *label)
 		goto done;
 	}
 
-	if (chip->request) {
-		/* chip->request may sleep */
+	if (chip->ops->request) {
+		/* chip->ops->request may sleep */
 		spin_unlock_irqrestore(&gpio_lock, flags);
-		status = chip->request(chip, gpio_chip_hwgpio(desc));
+		status = chip->ops->request(chip, gpio_chip_hwgpio(desc));
 		spin_lock_irqsave(&gpio_lock, flags);
 
 		if (status < 0) {
@@ -1716,8 +1716,8 @@ static int __gpiod_request(struct gpio_desc *desc, const char *label)
 			goto done;
 		}
 	}
-	if (chip->get_direction) {
-		/* chip->get_direction may sleep */
+	if (chip->ops->get_direction) {
+		/* chip->ops->get_direction may sleep */
 		spin_unlock_irqrestore(&gpio_lock, flags);
 		gpiod_get_direction(desc);
 		spin_lock_irqsave(&gpio_lock, flags);
@@ -1774,10 +1774,10 @@ static bool __gpiod_free(struct gpio_desc *desc)
 
 	chip = desc->chip;
 	if (chip && test_bit(FLAG_REQUESTED, &desc->flags)) {
-		if (chip->free) {
+		if (chip->ops->free) {
 			spin_unlock_irqrestore(&gpio_lock, flags);
 			might_sleep_if(chip->can_sleep);
-			chip->free(chip, gpio_chip_hwgpio(desc));
+			chip->ops->free(chip, gpio_chip_hwgpio(desc));
 			spin_lock_irqsave(&gpio_lock, flags);
 		}
 		desc_set_label(desc, NULL);
@@ -1982,7 +1982,7 @@ int gpiod_direction_input(struct gpio_desc *desc)
 	}
 
 	chip = desc->chip;
-	if (!chip->get || !chip->direction_input) {
+	if (!chip->ops->get || !chip->ops->direction_input) {
 		gpiod_warn(desc,
 			"%s: missing get() or direction_input() operations\n",
 			__func__);
@@ -2003,7 +2003,7 @@ int gpiod_direction_input(struct gpio_desc *desc)
 
 	offset = gpio_chip_hwgpio(desc);
 	if (status) {
-		status = chip->request(chip, offset);
+		status = chip->ops->request(chip, offset);
 		if (status < 0) {
 			gpiod_dbg(desc, "%s: chip request fail, %d\n",
 					__func__, status);
@@ -2014,7 +2014,7 @@ int gpiod_direction_input(struct gpio_desc *desc)
 		}
 	}
 
-	status = chip->direction_input(chip, offset);
+	status = chip->ops->direction_input(chip, offset);
 	if (status == 0)
 		clear_bit(FLAG_IS_OUT, &desc->flags);
 
@@ -2053,7 +2053,7 @@ static int _gpiod_direction_output_raw(struct gpio_desc *desc, int value)
 		return gpiod_direction_input(desc);
 
 	chip = desc->chip;
-	if (!chip->set || !chip->direction_output) {
+	if (!chip->ops->set || !chip->ops->direction_output) {
 		gpiod_warn(desc,
 		       "%s: missing set() or direction_output() operations\n",
 		       __func__);
@@ -2074,7 +2074,7 @@ static int _gpiod_direction_output_raw(struct gpio_desc *desc, int value)
 
 	offset = gpio_chip_hwgpio(desc);
 	if (status) {
-		status = chip->request(chip, offset);
+		status = chip->ops->request(chip, offset);
 		if (status < 0) {
 			gpiod_dbg(desc, "%s: chip request fail, %d\n",
 					__func__, status);
@@ -2085,7 +2085,7 @@ static int _gpiod_direction_output_raw(struct gpio_desc *desc, int value)
 		}
 	}
 
-	status = chip->direction_output(chip, offset, value);
+	status = chip->ops->direction_output(chip, offset, value);
 	if (status == 0)
 		set_bit(FLAG_IS_OUT, &desc->flags);
 	trace_gpio_value(desc_to_gpio(desc), 0, value);
@@ -2165,7 +2165,7 @@ int gpiod_set_debounce(struct gpio_desc *desc, unsigned debounce)
 	}
 
 	chip = desc->chip;
-	if (!chip->set || !chip->set_debounce) {
+	if (!chip->ops->set || !chip->ops->set_debounce) {
 		gpiod_dbg(desc,
 			  "%s: missing set() or set_debounce() operations\n",
 			  __func__);
@@ -2185,7 +2185,7 @@ int gpiod_set_debounce(struct gpio_desc *desc, unsigned debounce)
 	might_sleep_if(chip->can_sleep);
 
 	offset = gpio_chip_hwgpio(desc);
-	return chip->set_debounce(chip, offset, debounce);
+	return chip->ops->set_debounce(chip, offset, debounce);
 
 fail:
 	spin_unlock_irqrestore(&gpio_lock, flags);
@@ -2238,7 +2238,7 @@ static bool _gpiod_get_raw_value(const struct gpio_desc *desc)
 
 	chip = desc->chip;
 	offset = gpio_chip_hwgpio(desc);
-	value = chip->get ? chip->get(chip, offset) : false;
+	value = chip->ops->get ? chip->ops->get(chip, offset) : false;
 	trace_gpio_value(desc_to_gpio(desc), 1, value);
 	return value;
 }
@@ -2301,11 +2301,11 @@ static void _gpio_set_open_drain_value(struct gpio_desc *desc, bool value)
 	int offset = gpio_chip_hwgpio(desc);
 
 	if (value) {
-		err = chip->direction_input(chip, offset);
+		err = chip->ops->direction_input(chip, offset);
 		if (!err)
 			clear_bit(FLAG_IS_OUT, &desc->flags);
 	} else {
-		err = chip->direction_output(chip, offset, 0);
+		err = chip->ops->direction_output(chip, offset, 0);
 		if (!err)
 			set_bit(FLAG_IS_OUT, &desc->flags);
 	}
@@ -2328,11 +2328,11 @@ static void _gpio_set_open_source_value(struct gpio_desc *desc, bool value)
 	int offset = gpio_chip_hwgpio(desc);
 
 	if (value) {
-		err = chip->direction_output(chip, offset, 1);
+		err = chip->ops->direction_output(chip, offset, 1);
 		if (!err)
 			set_bit(FLAG_IS_OUT, &desc->flags);
 	} else {
-		err = chip->direction_input(chip, offset);
+		err = chip->ops->direction_input(chip, offset);
 		if (!err)
 			clear_bit(FLAG_IS_OUT, &desc->flags);
 	}
@@ -2354,7 +2354,7 @@ static void _gpiod_set_raw_value(struct gpio_desc *desc, bool value)
 	else if (test_bit(FLAG_OPEN_SOURCE, &desc->flags))
 		_gpio_set_open_source_value(desc, value);
 	else
-		chip->set(chip, gpio_chip_hwgpio(desc), value);
+		chip->ops->set(chip, gpio_chip_hwgpio(desc), value);
 }
 
 /**
@@ -2821,8 +2821,8 @@ static void gpiolib_dbg_show(struct seq_file *s, struct gpio_chip *chip)
 		seq_printf(s, " gpio-%-3d (%-20.20s) %s %s %s",
 			gpio, gdesc->label,
 			is_out ? "out" : "in ",
-			chip->get
-				? (chip->get(chip, i) ? "hi" : "lo")
+			chip->ops->get
+				? (chip->ops->get(chip, i) ? "hi" : "lo")
 				: "?  ",
 			is_irq ? "IRQ" : "   ");
 		seq_printf(s, "\n");
@@ -2888,8 +2888,8 @@ static int gpiolib_seq_show(struct seq_file *s, void *v)
 		seq_printf(s, ", can sleep");
 	seq_printf(s, ":\n");
 
-	if (chip->dbg_show)
-		chip->dbg_show(s, chip);
+	if (chip->ops->dbg_show)
+		chip->ops->dbg_show(s, chip);
 	else
 		gpiolib_dbg_show(s, chip);
 

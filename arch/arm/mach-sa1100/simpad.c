@@ -118,6 +118,13 @@ static int cs3_gpio_direction_output(struct gpio_chip *chip, unsigned offset,
 	return 0;
 };
 
+static const struct gpio_chip_ops cs3_gpio_ops = {
+	.set			= cs3_gpio_set,
+	.get			= cs3_gpio_get,
+	.direction_input	= cs3_gpio_direction_input,
+	.direction_output	= cs3_gpio_direction_output,
+};
+
 static struct map_desc simpad_io_desc[] __initdata = {
 	{	/* MQ200 */
 		.virtual	=  0xf2800000,
@@ -365,10 +372,7 @@ static int __init simpad_init(void)
 	cs3_gpio.label = "simpad_cs3";
 	cs3_gpio.base = SIMPAD_CS3_GPIO_BASE;
 	cs3_gpio.ngpio = 24;
-	cs3_gpio.set = cs3_gpio_set;
-	cs3_gpio.get = cs3_gpio_get;
-	cs3_gpio.direction_input = cs3_gpio_direction_input;
-	cs3_gpio.direction_output = cs3_gpio_direction_output;
+	cs3_gpio.ops = &cs3_gpio_ops;
 	ret = gpiochip_add(&cs3_gpio);
 	if (ret)
 		printk(KERN_WARNING "simpad: Unable to register cs3 GPIO device");

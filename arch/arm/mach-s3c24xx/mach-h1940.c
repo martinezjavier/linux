@@ -158,14 +158,18 @@ static int h1940_gpiolib_latch_get(struct gpio_chip *chip,
 	return (latch_state >> (offset + 16)) & 1;
 }
 
+static const struct gpio_chip_ops h1940_gpiolib_latch_ops = {
+	.direction_output	= h1940_gpiolib_latch_output,
+	.set			= h1940_gpiolib_latch_set,
+	.get			= h1940_gpiolib_latch_get,
+};
+
 static struct gpio_chip h1940_latch_gpiochip = {
 	.base			= H1940_LATCH_GPIO(0),
 	.owner			= THIS_MODULE,
 	.label			= "H1940_LATCH",
 	.ngpio			= 16,
-	.direction_output	= h1940_gpiolib_latch_output,
-	.set			= h1940_gpiolib_latch_set,
-	.get			= h1940_gpiolib_latch_get,
+	.ops			= &h1940_gpiolib_latch_ops,
 };
 
 static struct s3c2410_udc_mach_info h1940_udc_cfg __initdata = {

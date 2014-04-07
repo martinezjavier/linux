@@ -263,12 +263,16 @@ static int rbtx4938_spi_gpio_dir_out(struct gpio_chip *chip,
 	return 0;
 }
 
+static const struct gpio_chip_ops rbtx4938_spi_gpio_ops {
+	.set			= rbtx4938_spi_gpio_set,
+	.direction_output	= rbtx4938_spi_gpio_dir_out,
+};
+
 static struct gpio_chip rbtx4938_spi_gpio_chip = {
-	.set = rbtx4938_spi_gpio_set,
-	.direction_output = rbtx4938_spi_gpio_dir_out,
 	.label = "RBTX4938-SPICS",
 	.base = 16,
 	.ngpio = 3,
+	.ops = &rbtx4938_spi_gpio_ops,
 };
 
 static int __init rbtx4938_spi_init(void)

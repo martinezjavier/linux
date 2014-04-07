@@ -64,15 +64,19 @@ static int to_irq(struct gpio_chip *chip, unsigned offset)
 	return -EINVAL;
 }
 
-static struct gpio_chip gpiochip = {
-	.owner = THIS_MODULE,
+static const struct gpio_chip_ops ops {
 	.direction_input = direction_input,
 	.get = get,
 	.direction_output = direction_output,
 	.set = set,
+};
+
+static struct gpio_chip gpiochip = {
+	.owner = THIS_MODULE,
 	.to_irq = to_irq,
 	.base = 0,
 	.ngpio = 24,
+	.ops = &ops,
 	.can_sleep = 0, /* no blocking io needed */
 	.exported = 0, /* no exporting to userspace */
 };

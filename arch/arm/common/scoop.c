@@ -125,6 +125,13 @@ static int scoop_gpio_direction_output(struct gpio_chip *chip,
 	return 0;
 }
 
+static const struct gpio_chip_ops scoop_gpio_ops = {
+	.set			= scoop_gpio_set,
+	.get			= scoop_gpio_get,
+	.direction_input	= scoop_gpio_direction_input,
+	.direction_output	= scoop_gpio_direction_output,
+};
+
 unsigned short read_scoop_reg(struct device *dev, unsigned short reg)
 {
 	struct scoop_dev *sdev = dev_get_drvdata(dev);
@@ -220,10 +227,7 @@ static int scoop_probe(struct platform_device *pdev)
 		devptr->gpio.label = dev_name(&pdev->dev);
 		devptr->gpio.base = inf->gpio_base;
 		devptr->gpio.ngpio = 12; /* PA11 = 0, PA12 = 1, etc. up to PA22 = 11 */
-		devptr->gpio.set = scoop_gpio_set;
-		devptr->gpio.get = scoop_gpio_get;
-		devptr->gpio.direction_input = scoop_gpio_direction_input;
-		devptr->gpio.direction_output = scoop_gpio_direction_output;
+		devptr->gpio.ops = &scoop_gpio_ops;
 
 		ret = gpiochip_add(&devptr->gpio);
 		if (ret)

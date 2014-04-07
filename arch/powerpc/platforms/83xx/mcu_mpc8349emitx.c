@@ -118,6 +118,11 @@ static int mcu_gpio_dir_out(struct gpio_chip *gc, unsigned int gpio, int val)
 	return 0;
 }
 
+static const struct gpio_chip_ops mcu_gpio_ops {
+	.set			= mcu_gpio_set,
+	.direction_output	= mcu_gpio_dir_out,
+};
+
 static int mcu_gpiochip_add(struct mcu *mcu)
 {
 	struct device_node *np;
@@ -132,8 +137,7 @@ static int mcu_gpiochip_add(struct mcu *mcu)
 	gc->can_sleep = 1;
 	gc->ngpio = MCU_NUM_GPIO;
 	gc->base = -1;
-	gc->set = mcu_gpio_set;
-	gc->direction_output = mcu_gpio_dir_out;
+	gc->ops = &mcu_gpio_ops;
 	gc->of_node = np;
 
 	return gpiochip_add(gc);

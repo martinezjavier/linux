@@ -196,14 +196,18 @@ static int gemini_gpio_direction_output(struct gpio_chip *chip, unsigned offset,
 	return 0;
 }
 
-static struct gpio_chip gemini_gpio_chip = {
-	.label			= "Gemini",
+static const struct gpio_chip_ops gemini_gpio_ops = {
 	.direction_input	= gemini_gpio_direction_input,
 	.get			= gemini_gpio_get,
 	.direction_output	= gemini_gpio_direction_output,
 	.set			= gemini_gpio_set,
+};
+
+static struct gpio_chip gemini_gpio_chip = {
+	.label			= "Gemini",
 	.base			= 0,
 	.ngpio			= GPIO_PORT_NUM * 32,
+	.ops			= &gemini_gpio_ops,
 };
 
 void __init gemini_gpio_init(void)

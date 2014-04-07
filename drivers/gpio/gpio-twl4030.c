@@ -377,6 +377,15 @@ static int twl_direction_out(struct gpio_chip *chip, unsigned offset, int value)
 	return ret;
 }
 
+static const struct gpio_chip_ops twl_ops = {
+	.request		= twl_request,
+	.free			= twl_free,
+	.direction_input	= twl_direction_in,
+	.get			= twl_get,
+	.direction_output	= twl_direction_out,
+	.set			= twl_set,
+};
+
 static int twl_to_irq(struct gpio_chip *chip, unsigned offset)
 {
 	struct gpio_twl4030_priv *priv = to_gpio_twl4030(chip);
@@ -389,12 +398,7 @@ static int twl_to_irq(struct gpio_chip *chip, unsigned offset)
 static struct gpio_chip template_chip = {
 	.label			= "twl4030",
 	.owner			= THIS_MODULE,
-	.request		= twl_request,
-	.free			= twl_free,
-	.direction_input	= twl_direction_in,
-	.get			= twl_get,
-	.direction_output	= twl_direction_out,
-	.set			= twl_set,
+	.ops			= &twl_ops,
 	.to_irq			= twl_to_irq,
 	.can_sleep		= true,
 };

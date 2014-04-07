@@ -78,6 +78,13 @@ static int u8_gpio_dir_out(struct gpio_chip *gc, unsigned int gpio, int val)
 	return 0;
 }
 
+static const struct gpio_chip_ops u8_gpio_ops {
+	.direction_input	= u8_gpio_dir_in,
+	.direction_output	= u8_gpio_dir_out,
+	.get			= u8_gpio_get,
+	.set			= u8_gpio_set,
+};
+
 static void u8_gpio_save_regs(struct of_mm_gpio_chip *mm_gc)
 {
 	struct u8_gpio_chip *u8_gc = to_u8_gpio_chip(mm_gc);
@@ -103,10 +110,7 @@ static int __init u8_simple_gpiochip_add(struct device_node *np)
 
 	mm_gc->save_regs = u8_gpio_save_regs;
 	gc->ngpio = 8;
-	gc->direction_input = u8_gpio_dir_in;
-	gc->direction_output = u8_gpio_dir_out;
-	gc->get = u8_gpio_get;
-	gc->set = u8_gpio_set;
+	gc->ops = &u8_gpio_ops;
 
 	ret = of_mm_gpiochip_add(np, mm_gc);
 	if (ret)

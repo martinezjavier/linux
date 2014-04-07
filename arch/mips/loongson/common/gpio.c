@@ -122,14 +122,18 @@ static void ls2f_gpio_set_value(struct gpio_chip *chip,
 	gpio_set_value(gpio, value);
 }
 
-static struct gpio_chip ls2f_chip = {
-	.label			= "ls2f",
+static const struct gpio_chip_ops ls2f_gpio_ops {
 	.direction_input	= ls2f_gpio_direction_input,
 	.get			= ls2f_gpio_get_value,
 	.direction_output	= ls2f_gpio_direction_output,
 	.set			= ls2f_gpio_set_value,
+};
+
+static struct gpio_chip ls2f_chip = {
+	.label			= "ls2f",
 	.base			= 0,
 	.ngpio			= STLS2F_N_GPIO,
+	.ops			= &ls2f_gpio_ops,
 };
 
 static int __init ls2f_gpio_setup(void)

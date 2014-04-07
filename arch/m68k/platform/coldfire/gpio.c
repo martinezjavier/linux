@@ -147,6 +147,15 @@ void mcfgpio_free(struct gpio_chip *chip, unsigned offset)
 	__mcfgpio_free(offset);
 }
 
+static const struct gpio_chip_ops mcfgpio_ops {
+	.request		= mcfgpio_request,
+	.free			= mcfgpio_free,
+	.direction_input	= mcfgpio_direction_input,
+	.direction_output	= mcfgpio_direction_output,
+	.get			= mcfgpio_get_value,
+	.set			= mcfgpio_set_value,
+};
+
 struct bus_type mcfgpio_subsys = {
 	.name		= "gpio",
 	.dev_name	= "gpio",
@@ -154,14 +163,9 @@ struct bus_type mcfgpio_subsys = {
 
 static struct gpio_chip mcfgpio_chip = {
 	.label			= "mcfgpio",
-	.request		= mcfgpio_request,
-	.free			= mcfgpio_free,
-	.direction_input	= mcfgpio_direction_input,
-	.direction_output	= mcfgpio_direction_output,
-	.get			= mcfgpio_get_value,
-	.set			= mcfgpio_set_value,
 	.base			= 0,
 	.ngpio			= MCFGPIO_PIN_MAX,
+	.ops			= &mcfgpio_ops,
 };
 
 static int __init mcfgpio_sysinit(void)

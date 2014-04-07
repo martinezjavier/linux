@@ -94,26 +94,35 @@ static int gpio1_to_irq(struct gpio_chip *chip, unsigned offset)
 	return alchemy_gpio1_to_irq(offset + ALCHEMY_GPIO1_BASE);
 }
 
-struct gpio_chip alchemy_gpio_chip[] = {
+static const struct gpio_chip_ops alchemy_gpio_chip_ops[] = {
 	[0] = {
-		.label			= "alchemy-gpio1",
 		.direction_input	= gpio1_direction_input,
 		.direction_output	= gpio1_direction_output,
 		.get			= gpio1_get,
 		.set			= gpio1_set,
-		.to_irq			= gpio1_to_irq,
-		.base			= ALCHEMY_GPIO1_BASE,
-		.ngpio			= ALCHEMY_GPIO1_NUM,
 	},
 	[1] = {
-		.label			= "alchemy-gpio2",
 		.direction_input	= gpio2_direction_input,
 		.direction_output	= gpio2_direction_output,
 		.get			= gpio2_get,
 		.set			= gpio2_set,
+	},
+};
+
+struct gpio_chip alchemy_gpio_chip[] = {
+	[0] = {
+		.label			= "alchemy-gpio1",
+		.to_irq			= gpio1_to_irq,
+		.base			= ALCHEMY_GPIO1_BASE,
+		.ngpio			= ALCHEMY_GPIO1_NUM,
+		.ops			= &alchemy_gpio_chip_ops[0],
+	},
+	[1] = {
+		.label			= "alchemy-gpio2",
 		.to_irq			= gpio2_to_irq,
 		.base			= ALCHEMY_GPIO2_BASE,
 		.ngpio			= ALCHEMY_GPIO2_NUM,
+		.ops			= &alchemy_gpio_chip_ops[1],
 	},
 };
 
@@ -143,15 +152,19 @@ static int alchemy_gpic_gpio_to_irq(struct gpio_chip *chip, unsigned int off)
 	return au1300_gpio_to_irq(off + AU1300_GPIO_BASE);
 }
 
-static struct gpio_chip au1300_gpiochip = {
-	.label			= "alchemy-gpic",
+static const struct gpio_chip_ops au1300_gpic_ops {
 	.direction_input	= alchemy_gpic_dir_input,
 	.direction_output	= alchemy_gpic_dir_output,
 	.get			= alchemy_gpic_get,
 	.set			= alchemy_gpic_set,
+};
+
+static struct gpio_chip au1300_gpiochip = {
+	.label			= "alchemy-gpic",
 	.to_irq			= alchemy_gpic_gpio_to_irq,
 	.base			= AU1300_GPIO_BASE,
 	.ngpio			= AU1300_GPIO_NUM,
+	.ops			= &au1300_gpic_ops,
 };
 
 static int __init alchemy_gpiochip_init(void)

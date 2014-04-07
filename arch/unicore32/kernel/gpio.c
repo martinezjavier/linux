@@ -85,14 +85,18 @@ static int puv3_direction_output(struct gpio_chip *chip, unsigned offset,
 	return 0;
 }
 
-static struct gpio_chip puv3_gpio_chip = {
-	.label			= "gpio",
+static const struct gpio_chip_ops puv3_gpio_ops {
 	.direction_input	= puv3_direction_input,
 	.direction_output	= puv3_direction_output,
 	.set			= puv3_gpio_set,
 	.get			= puv3_gpio_get,
+};
+
+static struct gpio_chip puv3_gpio_chip = {
+	.label			= "gpio",
 	.base			= 0,
 	.ngpio			= GPIO_MAX + 1,
+	.ops			= &puv3_gpio_ops,
 };
 
 void __init puv3_init_gpio(void)

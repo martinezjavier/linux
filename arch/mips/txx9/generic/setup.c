@@ -736,6 +736,13 @@ static int txx9_iocled_dir_out(struct gpio_chip *chip, unsigned int offset,
 	return 0;
 }
 
+static const struct gpio_chip_ops txx9_iocled_ops {
+	.get			= txx9_iocled_get,
+	.set			= txx9_iocled_set,
+	.direction_input	= txx9_iocled_dir_in,
+	.direction_output	= txx9_iocled_dir_out,
+};
+
 void __init txx9_iocled_init(unsigned long baseaddr,
 			     int basenum, unsigned int num, int lowactive,
 			     const char *color, char **deftriggers)
@@ -758,13 +765,10 @@ void __init txx9_iocled_init(unsigned long baseaddr,
 	iocled->mmioaddr = ioremap(baseaddr, 1);
 	if (!iocled->mmioaddr)
 		goto out_free;
-	iocled->chip.get = txx9_iocled_get;
-	iocled->chip.set = txx9_iocled_set;
-	iocled->chip.direction_input = txx9_iocled_dir_in;
-	iocled->chip.direction_output = txx9_iocled_dir_out;
 	iocled->chip.label = "iocled";
 	iocled->chip.base = basenum;
 	iocled->chip.ngpio = num;
+	iocled->chip.ops = &txx9_iocled_ops;
 	if (gpiochip_add(&iocled->chip))
 		goto out_unmap;
 	if (basenum < 0)

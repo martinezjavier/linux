@@ -326,6 +326,13 @@ mpc52xx_gpt_gpio_dir_out(struct gpio_chip *gc, unsigned int gpio, int val)
 	return 0;
 }
 
+static const struct gpio_chip_ops mpc52xx_gpt_gpio_ops {
+	.direction_input	= mpc52xx_gpt_gpio_dir_in,
+	.direction_output	= mpc52xx_gpt_gpio_dir_out,
+	.get			= mpc52xx_gpt_gpio_get,
+	.set			= mpc52xx_gpt_gpio_set,
+};
+
 static void
 mpc52xx_gpt_gpio_setup(struct mpc52xx_gpt_priv *gpt, struct device_node *node)
 {
@@ -343,12 +350,9 @@ mpc52xx_gpt_gpio_setup(struct mpc52xx_gpt_priv *gpt, struct device_node *node)
 	}
 
 	gpt->gc.ngpio = 1;
-	gpt->gc.direction_input  = mpc52xx_gpt_gpio_dir_in;
-	gpt->gc.direction_output = mpc52xx_gpt_gpio_dir_out;
-	gpt->gc.get = mpc52xx_gpt_gpio_get;
-	gpt->gc.set = mpc52xx_gpt_gpio_set;
 	gpt->gc.base = -1;
 	gpt->gc.of_node = node;
+	gpt->gc.ops = &mpc52xx_gpt_gpio_ops;
 
 	/* Setup external pin in GPIO mode */
 	clrsetbits_be32(&gpt->regs->mode, MPC52xx_GPT_MODE_MS_MASK,

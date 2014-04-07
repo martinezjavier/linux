@@ -118,6 +118,13 @@ static int qe_gpio_dir_out(struct gpio_chip *gc, unsigned int gpio, int val)
 	return 0;
 }
 
+static const struct gpio_chip_ops qe_gpio_ops {
+	.direction_input	= qe_gpio_dir_in,
+	.direction_output	= qe_gpio_dir_out,
+	.get			= qe_gpio_get,
+	.set			= qe_gpio_set,
+};
+
 struct qe_pin {
 	/*
 	 * The qe_gpio_chip name is unfortunate, we should change that to
@@ -297,10 +304,7 @@ static int __init qe_add_gpiochips(void)
 
 		mm_gc->save_regs = qe_gpio_save_regs;
 		gc->ngpio = QE_PIO_PINS;
-		gc->direction_input = qe_gpio_dir_in;
-		gc->direction_output = qe_gpio_dir_out;
-		gc->get = qe_gpio_get;
-		gc->set = qe_gpio_set;
+		gc->ops = &qe_gpio_ops;
 
 		ret = of_mm_gpiochip_add(np, mm_gc);
 		if (ret)

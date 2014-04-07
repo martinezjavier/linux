@@ -444,15 +444,19 @@ static void ixp4xx_gpio_set_value(struct gpio_chip *chip, unsigned gpio,
 	gpio_line_set(gpio, value);
 }
 
-static struct gpio_chip ixp4xx_gpio_chip = {
-	.label			= "IXP4XX_GPIO_CHIP",
+static const struct gpio_chip_ops ixp4xx_gpio_ops = {
 	.direction_input	= ixp4xx_gpio_direction_input,
 	.direction_output	= ixp4xx_gpio_direction_output,
 	.get			= ixp4xx_gpio_get_value,
 	.set			= ixp4xx_gpio_set_value,
+};
+
+static struct gpio_chip ixp4xx_gpio_chip = {
+	.label			= "IXP4XX_GPIO_CHIP",
 	.to_irq			= ixp4xx_gpio_to_irq,
 	.base			= 0,
 	.ngpio			= 16,
+	.ops			= &ixp4xx_gpio_ops,
 };
 
 void __init ixp4xx_sys_init(void)

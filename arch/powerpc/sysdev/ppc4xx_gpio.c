@@ -173,6 +173,13 @@ ppc4xx_gpio_dir_out(struct gpio_chip *gc, unsigned int gpio, int val)
 	return 0;
 }
 
+static const struct gpio_chip_ops ppc4xx_gpio_ops {
+	.direction_input	= ppc4xx_gpio_dir_in,
+	.direction_output	= ppc4xx_gpio_dir_out,
+	.get			= ppc4xx_gpio_get,
+	.set			= ppc4xx_gpio_set,
+};
+
 static int __init ppc4xx_add_gpiochips(void)
 {
 	struct device_node *np;
@@ -195,10 +202,7 @@ static int __init ppc4xx_add_gpiochips(void)
 		gc = &mm_gc->gc;
 
 		gc->ngpio = 32;
-		gc->direction_input = ppc4xx_gpio_dir_in;
-		gc->direction_output = ppc4xx_gpio_dir_out;
-		gc->get = ppc4xx_gpio_get;
-		gc->set = ppc4xx_gpio_set;
+		gc->ops = &ppc4xx_gpio_ops;
 
 		ret = of_mm_gpiochip_add(np, mm_gc);
 		if (ret)

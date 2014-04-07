@@ -992,6 +992,16 @@ static void gpio_set(struct gpio_chip *chip, unsigned offset, int value)
 	spin_unlock_irqrestore(&bank->lock, flags);
 }
 
+static const struct gpio_chip_ops omap_gpio_ops = {
+	.request		= omap_gpio_request,
+	.free			= omap_gpio_free,
+	.direction_input	= gpio_input,
+	.get			= gpio_get,
+	.direction_output	= gpio_output,
+	.set_debounce		= gpio_debounce,
+	.set			= gpio_set,
+};
+
 /*---------------------------------------------------------------------*/
 
 static void __init omap_gpio_show_rev(struct gpio_bank *bank)
@@ -1083,13 +1093,8 @@ static int omap_gpio_chip_init(struct gpio_bank *bank)
 	 * REVISIT eventually switch from OMAP-specific gpio structs
 	 * over to the generic ones
 	 */
-	bank->chip.request = omap_gpio_request;
-	bank->chip.free = omap_gpio_free;
-	bank->chip.direction_input = gpio_input;
-	bank->chip.get = gpio_get;
-	bank->chip.direction_output = gpio_output;
-	bank->chip.set_debounce = gpio_debounce;
-	bank->chip.set = gpio_set;
+	bank->chip.ops = &omap_gpio_ops;
+
 	if (bank->is_mpuio) {
 		bank->chip.label = "mpuio";
 		if (bank->regs->wkup_en)

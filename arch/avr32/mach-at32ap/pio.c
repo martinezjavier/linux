@@ -381,6 +381,13 @@ static void pio_bank_show(struct seq_file *s, struct gpio_chip *chip)
 #define pio_bank_show	NULL
 #endif
 
+static const struct gpio_chip_ops gpio_ops = {
+	.direction_input	= direction_input,
+	.get			= gpio_get,
+	.direction_output	= direction_output,
+	.set			= gpio_set,
+	.dbg_show		= pio_bank_show,
+};
 
 /*--------------------------------------------------------------------------*/
 
@@ -400,11 +407,7 @@ static int __init pio_probe(struct platform_device *pdev)
 	pio->chip.dev = &pdev->dev;
 	pio->chip.owner = THIS_MODULE;
 
-	pio->chip.direction_input = direction_input;
-	pio->chip.get = gpio_get;
-	pio->chip.direction_output = direction_output;
-	pio->chip.set = gpio_set;
-	pio->chip.dbg_show = pio_bank_show;
+	pio->chip.ops = &gpio_ops;
 
 	gpiochip_add(&pio->chip);
 

@@ -212,6 +212,11 @@ static int vgpio_dir_out(struct gpio_chip *chip, unsigned offset, int value)
 	return 0;
 }
 
+static const struct gpio_chip_ops vgpio_ops = {
+	.direction_output	= vgpio_dir_out,
+	.set			= vgpio_set,
+};
+
 #define MX27ADS_LCD_GPIO	(6 * 32)
 
 static struct regulator_consumer_supply mx27ads_lcd_regulator_consumer =
@@ -241,8 +246,7 @@ static void __init mx27ads_regulator_init(void)
 	vchip->label		= "LCD";
 	vchip->base		= MX27ADS_LCD_GPIO;
 	vchip->ngpio		= 1;
-	vchip->direction_output	= vgpio_dir_out;
-	vchip->set		= vgpio_set;
+	vchip->ops		= &vgpio_ops;
 	gpiochip_add(vchip);
 
 	platform_device_register_data(&platform_bus, "reg-fixed-voltage",

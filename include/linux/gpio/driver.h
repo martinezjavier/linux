@@ -15,35 +15,22 @@ struct seq_file;
 
 #ifdef CONFIG_GPIOLIB
 
+struct gpio_chip_ops;
+
 /**
  * struct gpio_chip - abstract a GPIO controller
  * @label: for diagnostics
  * @dev: optional device providing the GPIOs
  * @owner: helps prevent removal of modules exporting active GPIOs
  * @list: links gpio_chips together for traversal
- * @request: optional hook for chip-specific activation, such as
- *	enabling module power and clock; may sleep
- * @free: optional hook for chip-specific deactivation, such as
- *	disabling module power and clock; may sleep
- * @get_direction: returns direction for signal "offset", 0=out, 1=in,
- *	(same as GPIOF_DIR_XXX), or negative error
- * @direction_input: configures signal "offset" as input, or returns error
- * @direction_output: configures signal "offset" as output, or returns error
- * @get: returns value for signal "offset"; for output signals this
- *	returns either the value actually sensed, or zero
- * @set: assigns output value for signal "offset"
- * @set_debounce: optional hook for setting debounce time for specified gpio in
- *      interrupt triggered gpio chips
  * @to_irq: optional hook supporting non-static gpio_to_irq() mappings;
  *	implementation may not sleep
- * @dbg_show: optional routine to show contents in debugfs; default code
- *	will be used when this is omitted, but custom code can show extra
- *	state (such as pullup/pulldown configuration).
  * @base: identifies the first GPIO number handled by this chip; or, if
  *	negative during registration, requests dynamic ID allocation.
  * @ngpio: the number of GPIOs handled by this controller; the last GPIO
  *	handled is (base + ngpio - 1).
  * @desc: array of ngpio descriptors. Private.
+ * @ops: virtual table with GPIO controller operations.
  * @names: if set, must be an array of strings to use as alternative
  *      names for the GPIOs in this chip. Any entry in the array
  *      may be NULL if there is no alias for the GPIO, however the
@@ -73,33 +60,18 @@ struct gpio_chip {
 	struct module		*owner;
 	struct list_head        list;
 
-	int			(*request)(struct gpio_chip *chip,
-						unsigned offset);
-	void			(*free)(struct gpio_chip *chip,
-						unsigned offset);
-	int			(*get_direction)(struct gpio_chip *chip,
-						unsigned offset);
-	int			(*direction_input)(struct gpio_chip *chip,
-						unsigned offset);
-	int			(*direction_output)(struct gpio_chip *chip,
-						unsigned offset, int value);
-	int			(*get)(struct gpio_chip *chip,
-						unsigned offset);
-	void			(*set)(struct gpio_chip *chip,
-						unsigned offset, int value);
-	int			(*set_debounce)(struct gpio_chip *chip,
-						unsigned offset,
-						unsigned debounce);
-
+	/*
+	 * The to_irq function pointer is not in struct gpio_chip_ops
+	 * because it can be modified inside the gpiolib.
+	 */
 	int			(*to_irq)(struct gpio_chip *chip,
 						unsigned offset);
 
-	void			(*dbg_show)(struct seq_file *s,
-						struct gpio_chip *chip);
 	int			base;
 	u16			ngpio;
 	struct gpio_desc	*desc;
 	const char		*const *names;
+	const struct gpio_chip_ops    *ops;
 	bool			can_sleep;
 	bool			exported;
 
@@ -134,6 +106,51 @@ struct gpio_chip {
 	 */
 	struct list_head pin_ranges;
 #endif
+};
+
+/**
+ * struct gpio_chip_ops - virtual function table for GPIO controller operations
+ * @request: optional hook for chip-specific activation, such as
+ *	enabling module power and clock; may sleep
+ * @free: optional hook for chip-specific deactivation, such as
+ *	disabling module power and clock; may sleep
+ * @get_direction: returns direction for signal "offset", 0=out, 1=in,
+ *	(same as GPIOF_DIR_XXX), or negative error
+ * @direction_input: configures signal "offset" as input, or returns error
+ * @direction_output: configures signal "offset" as output, or returns error
+ * @get: returns value for signal "offset"; for output signals this
+ *	returns either the value actually sensed, or zero
+ * @set: assigns output value for signal "offset"
+ * @set_debounce: optional hook for setting debounce time for specified gpio in
+ *      interrupt triggered gpio chips
+ * @dbg_show: optional routine to show contents in debugfs; default code
+ *	will be used when this is omitted, but custom code can show extra
+ *	state (such as pullup/pulldown configuration).
+ *
+ * A gpio_chip_ops is used as a virtual function table for gpio_chip so GPIO
+ * drivers can define their custom methods as needed by its the GPIO controller.
+ */
+struct gpio_chip_ops {
+	int			(*request)(struct gpio_chip *chip,
+						unsigned offset);
+	void			(*free)(struct gpio_chip *chip,
+						unsigned offset);
+	int			(*get_direction)(struct gpio_chip *chip,
+						unsigned offset);
+	int			(*direction_input)(struct gpio_chip *chip,
+						unsigned offset);
+	int			(*direction_output)(struct gpio_chip *chip,
+						unsigned offset, int value);
+	int			(*get)(struct gpio_chip *chip,
+						unsigned offset);
+	void			(*set)(struct gpio_chip *chip,
+						unsigned offset, int value);
+	int			(*set_debounce)(struct gpio_chip *chip,
+						unsigned offset,
+						unsigned debounce);
+
+	void			(*dbg_show)(struct seq_file *s,
+						struct gpio_chip *chip);
 };
 
 extern const char *gpiochip_is_requested(struct gpio_chip *chip,

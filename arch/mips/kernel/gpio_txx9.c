@@ -69,12 +69,16 @@ static int txx9_gpio_dir_out(struct gpio_chip *chip, unsigned int offset,
 	return 0;
 }
 
+static const struct gpio_chip_ops txx9_gpio_ops {
+	.get			= txx9_gpio_get,
+	.set			= txx9_gpio_set,
+	.direction_input	= txx9_gpio_dir_in,
+	.direction_output	= txx9_gpio_dir_out,
+};
+
 static struct gpio_chip txx9_gpio_chip = {
-	.get = txx9_gpio_get,
-	.set = txx9_gpio_set,
-	.direction_input = txx9_gpio_dir_in,
-	.direction_output = txx9_gpio_dir_out,
 	.label = "TXx9",
+	.ops = &txx9_gpio_ops,
 };
 
 int __init txx9_gpio_init(unsigned long baseaddr,

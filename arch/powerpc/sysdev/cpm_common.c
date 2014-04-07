@@ -323,6 +323,13 @@ static int cpm2_gpio32_dir_in(struct gpio_chip *gc, unsigned int gpio)
 	return 0;
 }
 
+static const struct gpio_chip_ops cpm2_gpio32_ops {
+	.direction_input	= cpm2_gpio32_dir_in,
+	.direction_output	= cpm2_gpio32_dir_out,
+	.get			= cpm2_gpio32_get,
+	.set			= cpm2_gpio32_set,
+};
+
 int cpm2_gpiochip_add32(struct device_node *np)
 {
 	struct cpm2_gpio32_chip *cpm2_gc;
@@ -340,10 +347,7 @@ int cpm2_gpiochip_add32(struct device_node *np)
 
 	mm_gc->save_regs = cpm2_gpio32_save_regs;
 	gc->ngpio = 32;
-	gc->direction_input = cpm2_gpio32_dir_in;
-	gc->direction_output = cpm2_gpio32_dir_out;
-	gc->get = cpm2_gpio32_get;
-	gc->set = cpm2_gpio32_set;
+	gc->ops = &cpm2_gpio32_ops;
 
 	return of_mm_gpiochip_add(np, mm_gc);
 }

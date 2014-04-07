@@ -497,6 +497,15 @@ static void orion_gpio_dbg_show(struct seq_file *s, struct gpio_chip *chip)
 #define orion_gpio_dbg_show NULL
 #endif
 
+static const struct gpio_chip_ops orion_gpio_ops = {
+	.request		= orion_gpio_request,
+	.direction_input	= orion_gpio_direction_input,
+	.get			= orion_gpio_get,
+	.direction_output	= orion_gpio_direction_output,
+	.set			= orion_gpio_set,
+	.dbg_show		= orion_gpio_dbg_show,
+};
+
 void __init orion_gpio_init(struct device_node *np,
 			    int gpio_base, int ngpio,
 			    void __iomem *base, int mask_offset,
@@ -517,19 +526,14 @@ void __init orion_gpio_init(struct device_node *np,
 
 	ochip = orion_gpio_chips + orion_gpio_chip_count;
 	ochip->chip.label = kstrdup(gc_label, GFP_KERNEL);
-	ochip->chip.request = orion_gpio_request;
-	ochip->chip.direction_input = orion_gpio_direction_input;
-	ochip->chip.get = orion_gpio_get;
-	ochip->chip.direction_output = orion_gpio_direction_output;
-	ochip->chip.set = orion_gpio_set;
 	ochip->chip.to_irq = orion_gpio_to_irq;
 	ochip->chip.base = gpio_base;
 	ochip->chip.ngpio = ngpio;
+	ochip->chip.ops = &orion_gpio_ops;
 	ochip->chip.can_sleep = 0;
 #ifdef CONFIG_OF
 	ochip->chip.of_node = np;
 #endif
-	ochip->chip.dbg_show = orion_gpio_dbg_show;
 
 	spin_lock_init(&ochip->lock);
 	ochip->base = (void __iomem *)base;

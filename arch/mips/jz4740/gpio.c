@@ -232,6 +232,13 @@ static int jz_gpio_direction_input(struct gpio_chip *chip, unsigned gpio)
 	return 0;
 }
 
+static const struct gpio_chip_ops jz_gpio_ops {
+	.set			= jz_gpio_set_value,
+	.get			= jz_gpio_get_value,
+	.direction_output	= jz_gpio_direction_output,
+	.direction_input	= jz_gpio_direction_input,
+};
+
 int jz_gpio_port_direction_input(int port, uint32_t mask)
 {
 	writel(mask, GPIO_TO_REG(port, JZ_REG_GPIO_DIRECTION_CLEAR));
@@ -400,12 +407,9 @@ static int jz_gpio_irq_set_wake(struct irq_data *data, unsigned int on)
 	.gpio_chip = { \
 		.label = "Bank " # _bank, \
 		.owner = THIS_MODULE, \
-		.set = jz_gpio_set_value, \
-		.get = jz_gpio_get_value, \
-		.direction_output = jz_gpio_direction_output, \
-		.direction_input = jz_gpio_direction_input, \
 		.base = JZ4740_GPIO_BASE_ ## _bank, \
 		.ngpio = JZ4740_GPIO_NUM_ ## _bank, \
+		.ops = &jz_gpio_ops, \
 	}, \
 }
 

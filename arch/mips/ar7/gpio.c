@@ -133,27 +133,35 @@ static int titan_gpio_direction_output(struct gpio_chip *chip,
 	return 0;
 }
 
-static struct ar7_gpio_chip ar7_gpio_chip = {
-	.chip = {
-		.label			= "ar7-gpio",
+static const struct gpio_chip_ops ar7_gpio_ops {
 		.direction_input	= ar7_gpio_direction_input,
 		.direction_output	= ar7_gpio_direction_output,
 		.set			= ar7_gpio_set_value,
 		.get			= ar7_gpio_get_value,
+};
+
+static const struct gpio_chip_ops titan_gpio_ops {
+		.direction_input	= titan_gpio_direction_input,
+		.direction_output	= titan_gpio_direction_output,
+		.set			= titan_gpio_set_value,
+		.get			= titan_gpio_get_value,
+};
+
+static struct ar7_gpio_chip ar7_gpio_chip = {
+	.chip = {
+		.label			= "ar7-gpio",
 		.base			= 0,
 		.ngpio			= AR7_GPIO_MAX,
+		.ops			= &ar7_gpio_ops,
 	}
 };
 
 static struct ar7_gpio_chip titan_gpio_chip = {
 	.chip = {
 		.label			= "titan-gpio",
-		.direction_input	= titan_gpio_direction_input,
-		.direction_output	= titan_gpio_direction_output,
-		.set			= titan_gpio_set_value,
-		.get			= titan_gpio_get_value,
 		.base			= 0,
 		.ngpio			= TITAN_GPIO_MAX,
+		.ops			= &titan_gpio_ops,
 	}
 };
 

@@ -76,42 +76,36 @@ static void bf538_gpio_free(struct gpio_chip *chip, unsigned gpio)
 	return bfin_special_gpio_free(chip->base + gpio);
 }
 
+static const struct gpio_chip_ops bf538_gpio_ops = {
+	.direction_input	= bf538_gpio_direction_input,
+	.get			= bf538_gpio_get_value,
+	.direction_output	= bf538_gpio_direction_output,
+	.set			= bf538_gpio_set_value,
+	.request		= bf538_gpio_request,
+	.free			= bf538_gpio_free,
+};
+
 /* We don't set the irq fields as these banks cannot generate interrupts */
 
 static struct gpio_chip bf538_portc_chip = {
 	.label = "GPIO-PC",
-	.direction_input = bf538_gpio_direction_input,
-	.get = bf538_gpio_get_value,
-	.direction_output = bf538_gpio_direction_output,
-	.set = bf538_gpio_set_value,
-	.request = bf538_gpio_request,
-	.free = bf538_gpio_free,
 	.base = GPIO_PC0,
 	.ngpio = GPIO_PC9 - GPIO_PC0 + 1,
+	.ops = &bf538_gpio_ops
 };
 
 static struct gpio_chip bf538_portd_chip = {
 	.label = "GPIO-PD",
-	.direction_input = bf538_gpio_direction_input,
-	.get = bf538_gpio_get_value,
-	.direction_output = bf538_gpio_direction_output,
-	.set = bf538_gpio_set_value,
-	.request = bf538_gpio_request,
-	.free = bf538_gpio_free,
 	.base = GPIO_PD0,
 	.ngpio = GPIO_PD13 - GPIO_PD0 + 1,
+	.ops = &bf538_gpio_ops
 };
 
 static struct gpio_chip bf538_porte_chip = {
 	.label = "GPIO-PE",
-	.direction_input = bf538_gpio_direction_input,
-	.get = bf538_gpio_get_value,
-	.direction_output = bf538_gpio_direction_output,
-	.set = bf538_gpio_set_value,
-	.request = bf538_gpio_request,
-	.free = bf538_gpio_free,
 	.base = GPIO_PE0,
 	.ngpio = GPIO_PE15 - GPIO_PE0 + 1,
+	.ops = &bf538_gpio_ops
 };
 
 static int __init bf538_extgpio_setup(void)

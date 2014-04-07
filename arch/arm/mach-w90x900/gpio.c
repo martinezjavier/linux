@@ -36,12 +36,9 @@
 	{								\
 		.chip = {						\
 			.label		  = name,			\
-			.direction_input  = nuc900_dir_input,		\
-			.direction_output = nuc900_dir_output,		\
-			.get		  = nuc900_gpio_get,		\
-			.set		  = nuc900_gpio_set,		\
 			.base		  = base_gpio,			\
 			.ngpio		  = nr_gpio,			\
+			.ops		  = &nuc900_gpio_ops		\
 		}							\
 	}
 
@@ -129,6 +126,13 @@ static int nuc900_dir_output(struct gpio_chip *chip, unsigned offset, int val)
 
 	return 0;
 }
+
+static const struct gpio_chip_ops nuc900_gpio_ops = {
+	.direction_input	= nuc900_dir_input,
+	.direction_output	= nuc900_dir_output,
+	.get			= nuc900_gpio_get,
+	.set			= nuc900_gpio_set,
+};
 
 static struct nuc900_gpio_chip nuc900_gpio[] = {
 	NUC900_GPIO_CHIP("GROUPC", 0, 16),

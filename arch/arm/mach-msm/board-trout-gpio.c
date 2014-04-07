@@ -77,17 +77,21 @@ static int trout_gpio_to_irq(struct gpio_chip *chip, unsigned offset)
 	return TROUT_GPIO_TO_INT(offset + chip->base);
 }
 
+static const struct gpio_chip_ops msm_gpiolib_ops = {
+	.direction_input	= msm_gpiolib_direction_input,
+	.direction_output	= msm_gpiolib_direction_output,
+	.get			= msm_gpiolib_get,
+	.set			= msm_gpiolib_set,
+};
+
 #define TROUT_GPIO_BANK(name, reg_num, base_gpio, shadow_val)		\
 	{								\
 		.chip = {						\
 			.label		  = name,			\
-			.direction_input  = msm_gpiolib_direction_input,\
-			.direction_output = msm_gpiolib_direction_output, \
-			.get		  = msm_gpiolib_get,		\
-			.set		  = msm_gpiolib_set,		\
 			.to_irq		  = trout_gpio_to_irq,		\
 			.base		  = base_gpio,			\
 			.ngpio		  = 8,				\
+			.ops		  = &msm_gpiolib_ops,		\
 		},							\
 		.reg = (void *) reg_num + TROUT_CPLD_BASE,		\
 		.shadow = shadow_val,					\

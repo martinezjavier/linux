@@ -128,13 +128,17 @@ static int ar934x_gpio_direction_output(struct gpio_chip *chip, unsigned offset,
 	return 0;
 }
 
-static struct gpio_chip ath79_gpio_chip = {
-	.label			= "ath79",
+static const struct gpio_chip_ops ath79_gpio_ops {
 	.get			= ath79_gpio_get_value,
 	.set			= ath79_gpio_set_value,
 	.direction_input	= ath79_gpio_direction_input,
 	.direction_output	= ath79_gpio_direction_output,
+};
+
+static struct gpio_chip ath79_gpio_chip = {
+	.label			= "ath79",
 	.base			= 0,
+	.ops			= &ath79_gpio_ops,
 };
 
 static void __iomem *ath79_gpio_get_function_reg(void)

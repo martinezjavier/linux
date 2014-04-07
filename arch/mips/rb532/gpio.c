@@ -140,16 +140,20 @@ static int rb532_gpio_direction_output(struct gpio_chip *chip,
 	return 0;
 }
 
+static const struct gpio_chip_ops rb532_gpio_ops {
+	.direction_input	= rb532_gpio_direction_input,
+	.direction_output	= rb532_gpio_direction_output,
+	.get			= rb532_gpio_get,
+	.set			= rb532_gpio_set,
+};
+
 static struct rb532_gpio_chip rb532_gpio_chip[] = {
 	[0] = {
 		.chip = {
 			.label			= "gpio0",
-			.direction_input	= rb532_gpio_direction_input,
-			.direction_output	= rb532_gpio_direction_output,
-			.get			= rb532_gpio_get,
-			.set			= rb532_gpio_set,
 			.base			= 0,
 			.ngpio			= 32,
+			.ops			= &rb532_gpio_ops,
 		},
 	},
 };

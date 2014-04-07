@@ -48,6 +48,11 @@ static int x3proto_gpio_get(struct gpio_chip *chip, unsigned gpio)
 	return !!(__raw_readw(KEYDETR) & (1 << gpio));
 }
 
+static const struct gpio_chip_ops x3proto_gpio_ops {
+	.direction_input	= x3proto_gpio_direction_input,
+	.get			= x3proto_gpio_get,
+};
+
 static int x3proto_gpio_to_irq(struct gpio_chip *chip, unsigned gpio)
 {
 	int virq;
@@ -78,11 +83,10 @@ static void x3proto_gpio_irq_handler(unsigned int irq, struct irq_desc *desc)
 
 struct gpio_chip x3proto_gpio_chip = {
 	.label			= "x3proto-gpio",
-	.direction_input	= x3proto_gpio_direction_input,
-	.get			= x3proto_gpio_get,
 	.to_irq			= x3proto_gpio_to_irq,
 	.base			= -1,
 	.ngpio			= NR_BASEBOARD_GPIOS,
+	.ops			= &x3proto_gpio_ops,
 };
 
 static int x3proto_gpio_irq_map(struct irq_domain *domain, unsigned int virq,

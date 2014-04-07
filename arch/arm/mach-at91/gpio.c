@@ -55,18 +55,22 @@ static int at91_gpiolib_direction_input(struct gpio_chip *chip,
 					unsigned offset);
 static int at91_gpiolib_to_irq(struct gpio_chip *chip, unsigned offset);
 
+static const struct gpio_chip_ops at91_gpiolib_ops = {
+	.request		= at91_gpiolib_request,
+	.direction_input	= at91_gpiolib_direction_input,
+	.direction_output	= at91_gpiolib_direction_output,
+	.get			= at91_gpiolib_get,
+	.set			= at91_gpiolib_set,
+	.dbg_show		= at91_gpiolib_dbg_show,
+};
+
 #define AT91_GPIO_CHIP(name)						\
 	{								\
 		.chip = {						\
 			.label		  = name,			\
-			.request	  = at91_gpiolib_request,	\
-			.direction_input  = at91_gpiolib_direction_input, \
-			.direction_output = at91_gpiolib_direction_output, \
-			.get		  = at91_gpiolib_get,		\
-			.set		  = at91_gpiolib_set,		\
-			.dbg_show	  = at91_gpiolib_dbg_show,	\
 			.to_irq		  = at91_gpiolib_to_irq,	\
 			.ngpio		  = MAX_NB_GPIO_PER_BANK,	\
+			.ops		  = &at91_gpiolib_ops,		\
 		},							\
 	}
 

@@ -33,13 +33,17 @@ static int usrgpir_gpio_get(struct gpio_chip *chip, unsigned gpio)
 	return !!(fpga_read_reg(USRGPIR) & (1 << gpio));
 }
 
+static const struct gpio_chip_ops usrgpir_gpio_ops {
+	.direction_input	= usrgpir_gpio_direction_input,
+	.get			= usrgpir_gpio_get,
+};
+
 static struct gpio_chip usrgpir_gpio_chip = {
 	.label			= "sdk7786-fpga",
 	.names			= usrgpir_gpio_names,
-	.direction_input	= usrgpir_gpio_direction_input,
-	.get			= usrgpir_gpio_get,
 	.base			= -1, /* don't care */
 	.ngpio			= NR_FPGA_GPIOS,
+	.ops			= &usrgpir_gpio_ops,
 };
 
 static int __init usrgpir_gpio_setup(void)

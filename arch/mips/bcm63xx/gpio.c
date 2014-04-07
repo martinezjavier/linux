@@ -141,14 +141,17 @@ static int bcm63xx_gpio_direction_output(struct gpio_chip *chip,
 	return bcm63xx_gpio_set_direction(chip, gpio, BCM63XX_GPIO_DIR_OUT);
 }
 
-
-static struct gpio_chip bcm63xx_gpio_chip = {
-	.label			= "bcm63xx-gpio",
+static const struct gpio_chip_ops bcm63xx_gpio_ops {
 	.direction_input	= bcm63xx_gpio_direction_input,
 	.direction_output	= bcm63xx_gpio_direction_output,
 	.get			= bcm63xx_gpio_get,
 	.set			= bcm63xx_gpio_set,
+};
+
+static struct gpio_chip bcm63xx_gpio_chip = {
+	.label			= "bcm63xx-gpio",
 	.base			= 0,
+	.ops			= &bcm63xx_gpio_ops,
 };
 
 int __init bcm63xx_gpio_init(void)

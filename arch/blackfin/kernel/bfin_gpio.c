@@ -1182,17 +1182,21 @@ static int bfin_gpiolib_gpio_to_irq(struct gpio_chip *chip, unsigned gpio)
 	return gpio + GPIO_IRQ_BASE;
 }
 
-static struct gpio_chip bfin_chip = {
-	.label			= "BFIN-GPIO",
+static const struct gpio_chip_ops bfin_gpiolib_ops = {
 	.direction_input	= bfin_gpiolib_direction_input,
 	.get			= bfin_gpiolib_get_value,
 	.direction_output	= bfin_gpiolib_direction_output,
 	.set			= bfin_gpiolib_set_value,
 	.request		= bfin_gpiolib_gpio_request,
 	.free			= bfin_gpiolib_gpio_free,
+};
+
+static struct gpio_chip bfin_chip = {
+	.label			= "BFIN-GPIO",
 	.to_irq			= bfin_gpiolib_gpio_to_irq,
 	.base			= 0,
 	.ngpio			= MAX_BLACKFIN_GPIOS,
+	.ops			= &bfin_gpiolib_ops,
 };
 
 static int __init bfin_gpiolib_setup(void)
