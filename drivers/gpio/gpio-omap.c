@@ -27,6 +27,7 @@
 #include <linux/irqchip/chained_irq.h>
 #include <linux/gpio.h>
 #include <linux/bitops.h>
+#include <linux/pinctrl/consumer.h>
 #include <linux/platform_data/gpio-omap.h>
 
 #define OFF_MODE	1
@@ -664,6 +665,11 @@ static int omap_gpio_request(struct gpio_chip *chip, unsigned offset)
 {
 	struct gpio_bank *bank = container_of(chip, struct gpio_bank, chip);
 	unsigned long flags;
+	int ret;
+
+	ret = pinctrl_request_gpio(chip->base + offset);
+	if (ret)
+		return ret;
 
 	/*
 	 * If this is the first gpio_request for the bank,
@@ -704,6 +710,8 @@ static void omap_gpio_free(struct gpio_chip *chip, unsigned offset)
 	 */
 	if (!BANK_USED(bank))
 		pm_runtime_put(bank->dev);
+
+	pinctrl_free_gpio(chip->base + offset);
 }
 
 /*
@@ -947,6 +955,11 @@ static int gpio_input(struct gpio_chip *chip, unsigned offset)
 {
 	struct gpio_bank *bank;
 	unsigned long flags;
+	int ret;
+
+	ret = pinctrl_gpio_direction_input(chip->base + offset);
+	if (ret)
+		return ret;
 
 	bank = container_of(chip, struct gpio_bank, chip);
 	spin_lock_irqsave(&bank->lock, flags);
@@ -973,6 +986,11 @@ static int gpio_output(struct gpio_chip *chip, unsigned offset, int value)
 {
 	struct gpio_bank *bank;
 	unsigned long flags;
+	int ret;
+
+	ret = pinctrl_gpio_direction_output(chip->base + offset);
+	if (ret)
+		return ret;
 
 	bank = container_of(chip, struct gpio_bank, chip);
 	spin_lock_irqsave(&bank->lock, flags);
