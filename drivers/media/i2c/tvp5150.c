@@ -326,7 +326,7 @@ static const struct i2c_reg_value tvp5150_init_default[] = {
 		TVP5150_CONTRAST_CTL,0x80
 	},
 	{ /* 0x0d */
-		TVP5150_DATA_RATE_SEL,0x47
+		TVP5150_DATA_RATE_SEL,0x40
 	},
 	{ /* 0x0e */
 		TVP5150_LUMA_PROC_CTL_3,0x00
@@ -437,7 +437,7 @@ static const struct i2c_reg_value tvp5150_init_enable[] = {
 	},{	/* Activates video std autodetection for all standards */
 		TVP5150_AUTOSW_MSK, 0x0
 	},{	/* Default format: 0x47. For 4:2:2: 0x40 */
-		TVP5150_DATA_RATE_SEL, 0x47
+		TVP5150_DATA_RATE_SEL, 0x40
 	},{
 		TVP5150_CHROMA_PROC_CTL_1, 0x0c
 	},{
@@ -1001,7 +1001,7 @@ static int tvp5150_s_stream(struct v4l2_subdev *sd, int enable)
 
 	/* Output format: 8-bit ITU-R BT.656 with embedded syncs */
 	if (enable)
-		tvp5150_write(sd, TVP5150_MISC_CTL, 0x09);
+		tvp5150_write(sd, TVP5150_MISC_CTL, 0x0d);
 	else
 		tvp5150_write(sd, TVP5150_MISC_CTL, 0x00);
 
