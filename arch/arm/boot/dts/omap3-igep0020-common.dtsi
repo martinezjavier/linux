@@ -107,6 +107,8 @@
 	pinctrl-0 = <
 		&tfp410_pins
 		&dss_dpi_pins
+		&cam_pins
+		&tvp5150_pins
 	>;
 
 	tfp410_pins: pinmux_tfp410_pins {
@@ -114,6 +116,38 @@
 			0x196 (PIN_OUTPUT | MUX_MODE4)   /* hdq_sio.gpio_170 */
 		>;
 	};
+
+	tvp5150_pins: pinmux_tvp5150_pins {
+                pinctrl-single,pins = <
+						OMAP3_CORE1_IOPAD(0x2130, PIN_OUTPUT | MUX_MODE4) /* ccdc_wen.gpio167 - tvp5150 reset pin */
+						OMAP3_CORE1_IOPAD(0x2132, PIN_OUTPUT | MUX_MODE4) /* cam_strobe.gpio126 - tvp5150 power down pin*/
+						>;
+        };
+        
+	cam_pins: pinmux_cam_pins {
+                pinctrl-single,pins = <
+                        OMAP3_CORE1_IOPAD(0x210c, PIN_INPUT | MUX_MODE0)  /* cam_hs.cam_hs */
+                        OMAP3_CORE1_IOPAD(0x210e, PIN_INPUT | MUX_MODE0)  /* cam_vs.cam_vs */
+                        OMAP3_CORE1_IOPAD(0x2110, PIN_OUTPUT| MUX_MODE0)  /* cam_xclka.cam_xclka */
+                        OMAP3_CORE1_IOPAD(0x2112, PIN_INPUT | MUX_MODE0)  /* cam_pclk.cam_pclk */
+                        OMAP3_CORE1_IOPAD(0x2114, PIN_INPUT | MUX_MODE4)  /* cam_fld.gpio98 */
+                        OMAP3_CORE1_IOPAD(0x2116, PIN_INPUT | MUX_MODE0)  /* cam_d0.cam_d0 */
+                        OMAP3_CORE1_IOPAD(0x2118, PIN_INPUT | MUX_MODE0)  /* cam_d1.cam_d1 */
+                        OMAP3_CORE1_IOPAD(0x211a, PIN_INPUT | MUX_MODE0)  /* cam_d2.cam_d2 */
+                        OMAP3_CORE1_IOPAD(0x211c, PIN_INPUT | MUX_MODE0)  /* cam_d3.cam_d3 */
+                        OMAP3_CORE1_IOPAD(0x211e, PIN_INPUT | MUX_MODE0)  /* cam_d4.cam_d4 */
+                        OMAP3_CORE1_IOPAD(0x2120, PIN_INPUT | MUX_MODE0)  /* cam_d5.cam_d5 */
+                        OMAP3_CORE1_IOPAD(0x2122, PIN_INPUT | MUX_MODE0)  /* cam_d6.cam_d6 */
+                        OMAP3_CORE1_IOPAD(0x2124, PIN_INPUT | MUX_MODE0)  /* cam_d7.cam_d7 */
+                        OMAP3_CORE1_IOPAD(0x2126, PIN_INPUT | MUX_MODE0)  /* cam_d8.cam_d8 */
+                        OMAP3_CORE1_IOPAD(0x2128, PIN_INPUT | MUX_MODE0)  /* cam_d9.cam_d9 */
+                        OMAP3_CORE1_IOPAD(0x212a, PIN_INPUT | MUX_MODE0)  /* cam_d10.cam_d10 */
+                        OMAP3_CORE1_IOPAD(0x212c, PIN_INPUT | MUX_MODE0)  /* cam_d11.cam_d11 */
+                        OMAP3_CORE1_IOPAD(0x212e, PIN_INPUT | MUX_MODE4)  /* cam_xclkb.gpio111 */
+                        /* OMAP3_CORE1_IOPAD(0x2130, PIN_INPUT | MUX_MODE0)   cam_wen.cam_wen */
+                        /* OMAP3_CORE1_IOPAD(0x2132, PIN_INPUT | MUX_MODE0)   cam_strobe.cam_strobe */
+                >;
+        };
 
 	dss_dpi_pins: pinmux_dss_dpi_pins {
 		pinctrl-single,pins = <
@@ -161,9 +195,9 @@
 &omap3_pmx_core2 {
 	pinctrl-names = "default";
 	pinctrl-0 = <
-		&hsusbb1_pins
-	>;
-
+		&hsusbb1_pins		
+		>;
+		
 	hsusbb1_pins: pinmux_hsusbb1_pins {
 		pinctrl-single,pins = <
 			OMAP3630_CORE2_IOPAD(0x25da, PIN_OUTPUT | MUX_MODE3)		/* etk_ctl.hsusb1_clk */
@@ -190,17 +224,28 @@
 	};
 };
 
-&i2c3 {
-	clock-frequency = <100000>;
-
-	/*
-	 * Display monitor features are burnt in the EEPROM
-	 * as EDID data.
-	 */
+&i2c2 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c2_pins>;
+	
+	clock-frequency = <400000>;
+	
+	tvp5150@5c {
+			compatible = "ti,tvp5150";
+			reg = <0x5c>;	
+			pinctrl-0 = <&tvp5150_pins>;
+			power_down_gpio = <&gpio4 30 GPIO_ACTIVE_HIGH>; 
+			reset_gpio = <&gpio6 7 GPIO_ACTIVE_HIGH>; 
+				port {
+					tvp5150_1: endpoint {
+						remote-endpoint = <&ccdc_ep>;
+					};
+				};
+			};
 	eeprom@50 {
-		compatible = "ti,eeprom";
-		reg = <0x50>;
-	};
+			compatible = "ti,eeprom";
+			reg = <0x50>;
+			};
 };
 
 &gpmc {
@@ -241,6 +286,23 @@
 		dpi_out: endpoint {
 			remote-endpoint = <&tfp410_in>;
 			data-lines = <24>;
+		};
+	};
+};
+
+&isp {
+	vdd-csiphy1-supply = <&vaux2>;
+	vdd-csiphy2-supply = <&vaux2>;
+	ports {
+		port@0 {
+			reg = <0>;
+			ccdc_ep: endpoint {
+			/*	remote-endpoint = <&mt9v034_out>; */
+			/*	remote-endpoint = <&tvp7002_1>; */
+				remote-endpoint = <&tvp5150_1>;
+				bus-width = <8>;
+				data-shift = <0>;
+			};
 		};
 	};
 };
