@@ -960,27 +960,16 @@ static int tvp5150_g_mbus_config(struct v4l2_subdev *sd,
 			V4L2 subdev pad ops
  ****************************************************************************/
 
-static int tvp5150_enum_mbus_code(struct v4l2_subdev *sd,
-				  struct v4l2_subdev_fh *fh,
-				  struct v4l2_subdev_mbus_code_enum *code)
-{
-	if (code->index > 0)
-		return -EINVAL;
-
-	code->code = V4L2_MBUS_FMT_UYVY8_2X8;
-	return 0;
-}
-
 static int tvp5150_enum_frame_size(struct v4l2_subdev *sd,
-				   struct v4l2_subdev_fh *fh,
+				   struct v4l2_subdev_pad_config *cfg,
 				   struct v4l2_subdev_frame_size_enum *fse)
 {
 	struct tvp5150 *decoder = to_tvp5150(sd);
 
-	if (fse->index >= 8 || fse->code != V4L2_MBUS_FMT_UYVY8_2X8)
+	if (fse->index >= 8 || fse->code != MEDIA_BUS_FMT_UYVY8_2X8)
 		return -EINVAL;
 
-	fse->code = V4L2_MBUS_FMT_UYVY8_2X8;
+	fse->code = MEDIA_BUS_FMT_UYVY8_2X8;
 	fse->min_width = decoder->rect.width;
 	fse->max_width = decoder->rect.width;
 	fse->min_height = decoder->rect.height / 2;
