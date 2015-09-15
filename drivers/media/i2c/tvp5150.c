@@ -5,6 +5,7 @@
  * This code is placed under the terms of the GNU General Public License v2
  */
 
+#include <linux/of_gpio.h>
 #include <linux/i2c.h>
 #include <linux/slab.h>
 #include <linux/videodev2.h>
@@ -1196,12 +1197,75 @@ static int tvp5150_detect_version(struct tvp5150 *core)
 	return 0;
 }
 
+static int tvp5150_init(struct i2c_client *client)
+{
+       /*
+        * From TVP5151 datasheet Table 3-8. Reset and Power-Down Modes
+        *   PDN RESETB CONFIGURATION
+        *    0    0    Reserved (unknown state)
+        *    0    1    Powers down the decoder
+        *    1    0    Resets the decoder
+        *    1    1    Normal operation
+        *
+        * If TVP5151_PDN and TPVP5151_RESET is set to 0 the I2C2_SDA line
+        * is forced to low level and all devices connected to I2C2 stop
+        * working, this affects to EEPROM connected to the same bus. By default
+        * we should configure these pins to logical 1 (Normal operation)
+        *
+        */
+        
+       struct device_node *np = client->dev.of_node;
+       int pdn_pin;
+       int reset_pin;
+       int error1;
+       int error2;
+        
+	   if (!np)
+				return -ENODEV;
+       
+       pdn_pin = of_get_named_gpio(np, "power_down_gpio", 0);
+       printk ("********* assignacio del gpio power_down %d *********\n",pdn_pin);
+       
+       if (!gpio_is_valid(pdn_pin)) {
+				printk ("power_down pin no valid");
+                 return -ENODEV;
+			}
+	   reset_pin = of_get_named_gpio(np, "reset_gpio", 0);
+	   printk ("********* assignacio del gpio reset_pin %d *********\n",reset_pin);
+	   if (!gpio_is_valid(reset_pin)) {
+				 printk ("reset pin no valid");
+                 return -ENODEV;
+			}
+           
+
+		error1 = devm_gpio_request_one(&client->dev,
+					pdn_pin, GPIOF_OUT_INIT_LOW,
+					"tvp5150 power_down_gpio");
+				printk("********** resposta gpio request : %d **********\n",error1);
+		error2 = devm_gpio_request_one(&client->dev,
+					reset_pin, GPIOF_OUT_INIT_LOW,
+					"tvp5150 reset_gpio");
+				printk("********** resposta gpio request : %d **********\n",error2);
+       
+               msleep(10);
+               gpio_set_value(pdn_pin, 1);
+               msleep(10);
+               printk ("*************** power down activat ************\n");
+               gpio_set_value(reset_pin, 1);
+               msleep(200);
+               printk ("************** reset activat ****************\n");
+ 
+	return 0;
+}
+
 static int tvp5150_probe(struct i2c_client *c,
 			 const struct i2c_device_id *id)
 {
 	struct tvp5150 *core;
 	struct v4l2_subdev *sd;
 	int res;
+
+	tvp5150_init(c);
 
 	/* Check if the adapter supports the needed features */
 	if (!i2c_check_functionality(c->adapter,
