@@ -1192,6 +1192,7 @@ static int tvp5150_probe(struct i2c_client *c,
 
 	if (debug > 1)
 		tvp5150_log_status(sd);
+
 	return 0;
 
 err:
