@@ -30,4 +30,9 @@
 #define TVP5150_NORMAL       0
 #define TVP5150_BLACK_SCREEN 1
 
+struct tvp5150_platform_data {
+	enum v4l2_mbus_type bus_type;
+	unsigned int parallel_flags;
+};
+
 #endif
