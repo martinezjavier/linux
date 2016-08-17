@@ -314,6 +314,15 @@ config TOUCHSCREEN_EGALAX_SERIAL
 	  To compile this driver as a module, choose M here: the
 	  module will be called egalax_ts_serial.
 
+config TOUCHSCREEN_FTS
+	tristate "STMicroelectronics i2c multitouch touchscreen with FingerTipS"
+	depends on I2C
+	help
+		Say Y here to enable STMicroelectronics touchscreen support.
+		If unsure, say N.
+		To compile this driver as a module, choose M here: the
+		module will be called STM_ts.
+
 config TOUCHSCREEN_FUJITSU
 	tristate "Fujitsu serial touchscreen"
 	select SERIO
