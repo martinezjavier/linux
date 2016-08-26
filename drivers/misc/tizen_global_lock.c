@@ -76,9 +76,7 @@ struct tgl_hash_node {
 	struct hlist_node	node;		/* hash node */
 };
 
-/* FIXME: Tizen platform is using slp_global_lock name yet */
-/* static const char tgl_dev_name[] = "tizen_global_lock"; */
-static const char tgl_dev_name[] = "slp_global_lock";
+static const char tgl_dev_name[] = "tgl";
 
 /* find the tgl_lock object with key in the hash table */
 static struct tgl_hash_node *tgl_hash_get_node(struct tgl_hash_head *hash,
