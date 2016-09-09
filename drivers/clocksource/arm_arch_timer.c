@@ -598,9 +598,6 @@ static void __init arch_counter_register(unsigned type)
 
 	/* Register the CP15 based counter if we have one */
 	if (type & ARCH_CP15_TIMER) {
-		if (IS_ENABLED(CONFIG_ARM64) || arch_timer_uses_ppi == VIRT_PPI)
-			arch_timer_read_counter = arch_counter_get_cntvct;
-		else
 			arch_timer_read_counter = arch_counter_get_cntpct;
 
 		clocksource_counter.archdata.vdso_direct = true;
