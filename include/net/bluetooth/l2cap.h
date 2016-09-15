@@ -938,4 +938,10 @@ void l2cap_conn_put(struct l2cap_conn *conn);
 int l2cap_register_user(struct l2cap_conn *conn, struct l2cap_user *user);
 void l2cap_unregister_user(struct l2cap_conn *conn, struct l2cap_user *user);
 
+#ifdef TIZEN_BT
+/* IPSP: Connect and Disconnect */
+int _bt_6lowpan_connect(bdaddr_t *addr, u8 dst_type);
+int _bt_6lowpan_disconnect(struct l2cap_conn *conn, u8 dst_type);
+#endif
+
 #endif /* __L2CAP_H */
