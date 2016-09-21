@@ -845,7 +845,6 @@ struct dwc3 {
 
 	unsigned		tx_de_emphasis_quirk:1;
 	unsigned		tx_de_emphasis:2;
-	unsigned		vbus_session:1;
 
 	unsigned		needs_reinit:1;
 };

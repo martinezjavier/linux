@@ -1593,52 +1593,11 @@ static int dwc3_gadget_run_stop(struct dwc3 *dwc, int is_on, int suspend)
 	return 0;
 }
 
-static int dwc3_gadget_vbus_session(struct usb_gadget *g, int is_active)
-{
-	struct dwc3 *dwc = gadget_to_dwc(g);
-	unsigned long flags;
-
-	if (!dwc->dotg)
-		return -EPERM;
-
-	is_active = !!is_active;
-
-	spin_lock_irqsave(&dwc->lock, flags);
-
-	/* Mark that the vbus was powered */
-	dwc->vbus_session = is_active;
-
-	/*
-	 * Check if upper level usb_gadget_driver was already registerd with
-	 * this udc controller driver (if dwc3_gadget_start was called)
-	 */
-	if (dwc->gadget_driver) {
-		if (dwc->vbus_session) {
-			/*
-			 * Both vbus was activated by otg and pullup was
-			 * signaled by the gadget driver.
-			 */
-			dwc3_gadget_run_stop(dwc, 1, false);
-		} else {
-			dwc3_gadget_run_stop(dwc, 0, false);
-		}
-	}
-
-	spin_unlock_irqrestore(&dwc->lock, flags);
-
-	return 0;
-}
-
-
 static int dwc3_gadget_pullup(struct usb_gadget *g, int is_on)
 {
 	struct dwc3		*dwc = gadget_to_dwc(g);
 	unsigned long		flags;
 	int			ret;
-
-	/* Need to wait for vbus_session(on) from otg driver */
-	if (dwc->dotg && !dwc->vbus_session)
-		return 0;
 
 	is_on = !!is_on;
 
@@ -1744,7 +1703,6 @@ static const struct usb_gadget_ops dwc3_gadget_ops = {
 	.get_frame		= dwc3_gadget_get_frame,
 	.wakeup			= dwc3_gadget_wakeup,
 	.set_selfpowered	= dwc3_gadget_set_selfpowered,
-	.vbus_session		= dwc3_gadget_vbus_session,
 	.pullup			= dwc3_gadget_pullup,
 	.udc_start		= dwc3_gadget_start,
 	.udc_stop		= dwc3_gadget_stop,
