@@ -411,10 +411,6 @@
 	samsung,lcd-wb;
 };
 
-&gsc_1 {
-	samsung,lcd-wb;
-};
-
 &hdmi {
 	status = "okay";
 	hpd-gpio = <&gpx3 7 0>;
