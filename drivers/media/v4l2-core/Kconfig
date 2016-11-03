@@ -96,3 +96,11 @@ config VIDEOBUF2_DMA_SG
 config VIDEOBUF2_DVB
 	tristate
 	select VIDEOBUF2_CORE
+
+config VIDEOBUF2_FENCE
+	bool "Videobuf2 dma-buf implicit fences"
+	depends on VIDEOBUF2_CORE
+        default n
+        help
+          Choose this option if you want to use fences for synchronization
+          of shared dma-buf access in v4l2 drivers using videobuf2.
