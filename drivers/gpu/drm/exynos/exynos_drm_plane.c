@@ -284,6 +284,11 @@ static int exynos_disable_plane(struct drm_plane *plane)
 
 	exynos_plane->update_pending = false;
 
+#ifdef CONFIG_DRM_DMA_SYNC
+	if (exynos_plane->fence)
+		drm_fence_signal_and_put(&exynos_plane->fence);
+#endif
+
 	if (exynos_crtc && exynos_crtc->ops->win_disable)
 		exynos_crtc->ops->win_disable(exynos_crtc,
 					      exynos_plane->zpos);
