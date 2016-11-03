@@ -115,6 +115,9 @@ struct vb2_plane {
 	void			*mem_priv;
 	struct dma_buf		*dbuf;
 	unsigned int		dbuf_mapped;
+	u64			fence_context;
+	atomic_t		fence_seqno;
+	struct fence		*pending_fence;
 };
 
 /**
@@ -146,6 +149,11 @@ enum vb2_io_modes {
  * @VB2_BUF_STATE_ERROR:	same as above, but the operation on the buffer
  *				has ended with an error, which will be reported
  *				to the userspace when it is dequeued
+ * @VB2_BUF_STATE_FENCES:	buffer has fences attached so it can be dequeued
+ * 				even while still queued in driver
+ * @VB2_BUF_STATE_FENCES_DEQUEUED: buffer dequeued but still queued in driver
+ * @VB2_BUF_STATE_FENCES_WAITING: buffer dequeued while queued in driver has been
+ *				  tried to be queued in videobuf again
  */
 enum vb2_buffer_state {
 	VB2_BUF_STATE_DEQUEUED,
@@ -155,6 +163,9 @@ enum vb2_buffer_state {
 	VB2_BUF_STATE_ACTIVE,
 	VB2_BUF_STATE_DONE,
 	VB2_BUF_STATE_ERROR,
+	VB2_BUF_STATE_FENCES,
+	VB2_BUF_STATE_FENCES_DEQUEUED,
+	VB2_BUF_STATE_FENCES_WAITING,
 };
 
 struct vb2_queue;
@@ -181,6 +192,13 @@ struct vb2_queue;
  * @done_entry:		entry on the list that stores all buffers ready to
  *			be dequeued to userspace
  * @planes:		private per-plane information; do not change
+ * @fence_context:	context for fences
+ * @fence_seqno:	sequence number for fences
+ * @cb:			callback to be executed when fences are signaled
+ * @fences_array:       buffer planes fences array used for signaling
+ * @fences:		indicate if fences support is enabled or disabled
+ * @signal_work:	workqueue to signal fences in non-atomic context
+ * @buffer_done:	completion to wait for driver processing buffer
  */
 struct vb2_buffer {
 	struct v4l2_buffer	v4l2_buf;
@@ -197,6 +215,16 @@ struct vb2_buffer {
 	struct list_head	done_entry;
 
 	struct vb2_plane	planes[VIDEO_MAX_PLANES];
+
+	u64                     fence_context;
+	atomic_t                fence_seqno;
+	struct fence_cb         cb;
+	struct fence            **fences_array;
+	struct fence		*pending_fence;
+	bool			fences;
+
+	struct work_struct      signal_work;
+	struct completion	buffer_done;
 
 #ifdef CONFIG_VIDEO_ADV_DEBUG
 	/*
