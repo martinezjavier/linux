@@ -581,7 +581,8 @@ unsigned int v4l2_m2m_poll(struct file *file, struct v4l2_m2m_ctx *m2m_ctx,
 		src_vb = list_first_entry(&src_q->done_list, struct vb2_buffer,
 						done_entry);
 	if (src_vb && (src_vb->state == VB2_BUF_STATE_DONE
-			|| src_vb->state == VB2_BUF_STATE_ERROR))
+			|| src_vb->state == VB2_BUF_STATE_ERROR
+		        || src_vb->state == VB2_BUF_STATE_FENCES))
 		rc |= POLLOUT | POLLWRNORM;
 	spin_unlock_irqrestore(&src_q->done_lock, flags);
 
@@ -590,7 +591,8 @@ unsigned int v4l2_m2m_poll(struct file *file, struct v4l2_m2m_ctx *m2m_ctx,
 		dst_vb = list_first_entry(&dst_q->done_list, struct vb2_buffer,
 						done_entry);
 	if (dst_vb && (dst_vb->state == VB2_BUF_STATE_DONE
-			|| dst_vb->state == VB2_BUF_STATE_ERROR))
+			|| dst_vb->state == VB2_BUF_STATE_ERROR
+		        || dst_vb->state == VB2_BUF_STATE_FENCES))
 		rc |= POLLIN | POLLRDNORM;
 	spin_unlock_irqrestore(&dst_q->done_lock, flags);
 
