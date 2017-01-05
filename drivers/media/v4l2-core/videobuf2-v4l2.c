@@ -192,6 +192,9 @@ static void __fill_v4l2_buffer(struct vb2_buffer *vb, void *pb)
 	struct vb2_queue *q = vb->vb2_queue;
 	unsigned int plane;
 
+	if (IS_ENABLED(CONFIG_VIDEOBUF2_FENCE) && vb->fences)
+		vb->timestamp = ktime_get_ns();
+
 	/* Copy back data such as timestamp, flags, etc. */
 	b->index = vb->index;
 	b->type = vb->type;
@@ -216,7 +219,11 @@ static void __fill_v4l2_buffer(struct vb2_buffer *vb, void *pb)
 			struct v4l2_plane *pdst = &b->m.planes[plane];
 			struct vb2_plane *psrc = &vb->planes[plane];
 
-			pdst->bytesused = psrc->bytesused;
+			if (IS_ENABLED(CONFIG_VIDEOBUF2_FENCE) && vb->fences &&
+			    psrc->bytesused == 0)
+				pdst->bytesused = psrc->length;
+			else
+				pdst->bytesused = psrc->bytesused;
 			pdst->length = psrc->length;
 			if (q->memory == VB2_MEMORY_MMAP)
 				pdst->m.mem_offset = psrc->m.offset;
@@ -233,7 +240,11 @@ static void __fill_v4l2_buffer(struct vb2_buffer *vb, void *pb)
 		 * single-planar buffers, but userspace does not.
 		 */
 		b->length = vb->planes[0].length;
-		b->bytesused = vb->planes[0].bytesused;
+		if (IS_ENABLED(CONFIG_VIDEOBUF2_FENCE) && vb->fences &&
+			vb->planes[0].bytesused == 0)
+			b->bytesused = vb->planes[0].length;
+		else
+			b->bytesused = vb->planes[0].bytesused;
 		if (q->memory == VB2_MEMORY_MMAP)
 			b->m.offset = vb->planes[0].m.offset;
 		else if (q->memory == VB2_MEMORY_USERPTR)
@@ -265,6 +276,7 @@ static void __fill_v4l2_buffer(struct vb2_buffer *vb, void *pb)
 		b->flags |= V4L2_BUF_FLAG_ERROR;
 		/* fall through */
 	case VB2_BUF_STATE_DONE:
+	case VB2_BUF_STATE_FENCES:
 		b->flags |= V4L2_BUF_FLAG_DONE;
 		break;
 	case VB2_BUF_STATE_PREPARED:
@@ -273,12 +285,17 @@ static void __fill_v4l2_buffer(struct vb2_buffer *vb, void *pb)
 	case VB2_BUF_STATE_PREPARING:
 	case VB2_BUF_STATE_DEQUEUED:
 	case VB2_BUF_STATE_REQUEUEING:
+	case VB2_BUF_STATE_FENCES_DEQUEUED:
+	case VB2_BUF_STATE_FENCES_WAITING:
 		/* nothing */
 		break;
 	}
 
 	if (vb2_buffer_in_use(q, vb))
 		b->flags |= V4L2_BUF_FLAG_MAPPED;
+
+	if (IS_ENABLED(CONFIG_VIDEOBUF2_FENCE) && vb->fences)
+		b->flags |= V4L2_BUF_FLAG_FENCES;
 
 	if (!q->is_output &&
 		b->flags & V4L2_BUF_FLAG_DONE &&

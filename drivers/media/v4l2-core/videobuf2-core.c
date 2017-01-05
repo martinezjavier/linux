@@ -23,8 +23,11 @@
 #include <linux/sched.h>
 #include <linux/freezer.h>
 #include <linux/kthread.h>
+#include <linux/dma-fence-array.h>
+#include <linux/reservation.h>
 
 #include <media/videobuf2-core.h>
+#include <media/videobuf2-fence.h>
 #include <media/v4l2-mc.h>
 
 #include <trace/events/vb2.h>
@@ -320,6 +323,54 @@ static void __setup_offsets(struct vb2_buffer *vb)
 }
 
 /**
+ *  __signal_fences() - signal pending fence for planes
+ */
+static void __signal_fences(struct vb2_buffer *vb)
+{
+	int plane;
+
+	/* signal fences */
+	for (plane = 0; plane < vb->num_planes; plane++)
+		if (vb->planes[plane].pending_fence) {
+			dma_fence_signal(vb->planes[plane].pending_fence);
+			dma_fence_put(vb->planes[plane].pending_fence);
+			vb->planes[plane].pending_fence = NULL;
+		}
+}
+
+static void __vb2_unmap_dmabuf(struct vb2_buffer *vb)
+{
+	int i;
+
+	for (i = 0; i < vb->num_planes; ++i) {
+		if (!vb->planes[i].dbuf_mapped)
+			continue;
+		call_void_memop(vb, unmap_dmabuf, vb->planes[i].mem_priv);
+		vb->planes[i].dbuf_mapped = 0;
+	}
+}
+
+/**
+ * vb2_signal_work - workqueue to signal pending fence in non-atomic context
+ */
+static void vb2_signal_work(struct work_struct *work)
+{
+	struct vb2_buffer *vb = container_of(work, struct vb2_buffer,
+					     signal_work);
+	struct vb2_queue *q = vb->vb2_queue;
+
+	if (q->memory == V4L2_MEMORY_DMABUF)
+		__vb2_unmap_dmabuf(vb);
+
+	__signal_fences(vb);
+
+	if (vb->state == VB2_BUF_STATE_FENCES_WAITING) {
+		vb->state = VB2_BUF_STATE_FENCES_DEQUEUED;
+		complete(&vb->buffer_done);
+	}
+}
+
+/**
  * __vb2_queue_alloc() - allocate videobuf buffer structures and (for MMAP type)
  * video buffer memory for all buffers/planes on the queue and initializes the
  * queue
@@ -348,6 +399,8 @@ static int __vb2_queue_alloc(struct vb2_queue *q, enum vb2_memory memory,
 		vb->index = q->num_buffers + buffer;
 		vb->type = q->type;
 		vb->memory = memory;
+		INIT_WORK(&vb->signal_work, vb2_signal_work);
+		init_completion(&vb->buffer_done);
 		for (plane = 0; plane < num_planes; ++plane) {
 			vb->planes[plane].length = plane_sizes[plane];
 			vb->planes[plane].min_length = plane_sizes[plane];
@@ -652,6 +705,42 @@ int vb2_verify_memory_type(struct vb2_queue *q,
 }
 EXPORT_SYMBOL(vb2_verify_memory_type);
 
+/**
+ * __fence_context_alloc() - allocate fence context for planes
+ */
+static int __fences_context_alloc(struct vb2_queue *q)
+{
+	struct vb2_buffer *vb;
+	int i, buf, plane;
+
+	for (buf = 0; buf < q->num_buffers; ++buf) {
+		vb = q->bufs[buf];
+
+		vb->fences_array = kmalloc(sizeof(struct dma_fence *) *
+					   vb->num_planes, GFP_KERNEL);
+		if (!vb->fences_array)
+			goto err;
+
+		vb->fence_context = dma_fence_context_alloc(1);
+		atomic_set(&vb->fence_seqno, 0);
+
+		for (plane = 0; plane < q->bufs[buf]->num_planes; plane++) {
+			vb->planes[plane].fence_context =
+				dma_fence_context_alloc(1);
+			atomic_set(&q->bufs[buf]->planes[plane].fence_seqno, 0);
+		}
+
+		vb->fences = true;
+	}
+
+	return 0;
+
+err:
+	for (i = 0; i < buf; i++)
+		kfree(q->bufs[buf]->fences_array);
+	return -ENOMEM;
+}
+
 int vb2_core_reqbufs(struct vb2_queue *q, enum vb2_memory memory,
 		unsigned int *count)
 {
@@ -773,6 +862,12 @@ int vb2_core_reqbufs(struct vb2_queue *q, enum vb2_memory memory,
 	*count = allocated_buffers;
 	q->waiting_for_buffers = !q->is_output;
 
+	if (IS_ENABLED(CONFIG_VIDEOBUF2_FENCE)) {
+		ret = __fences_context_alloc(q);
+		if (ret)
+			return ret;
+	}
+
 	return 0;
 }
 EXPORT_SYMBOL_GPL(vb2_core_reqbufs);
@@ -862,6 +957,12 @@ int vb2_core_create_bufs(struct vb2_queue *q, enum vb2_memory memory,
 	 */
 	*count = allocated_buffers;
 
+	if (IS_ENABLED(CONFIG_VIDEOBUF2_FENCE)) {
+		ret = __fences_context_alloc(q);
+		if (ret)
+			return ret;
+	}
+
 	return 0;
 }
 EXPORT_SYMBOL_GPL(vb2_core_create_bufs);
@@ -891,7 +992,10 @@ void vb2_buffer_done(struct vb2_buffer *vb, enum vb2_buffer_state state)
 	unsigned long flags;
 	unsigned int plane;
 
-	if (WARN_ON(vb->state != VB2_BUF_STATE_ACTIVE))
+	if (WARN_ON(vb->state != VB2_BUF_STATE_ACTIVE &&
+		    vb->state != VB2_BUF_STATE_FENCES &&
+		    vb->state != VB2_BUF_STATE_FENCES_DEQUEUED &&
+		    vb->state != VB2_BUF_STATE_FENCES_WAITING))
 		return;
 
 	if (WARN_ON(state != VB2_BUF_STATE_DONE &&
@@ -919,9 +1023,23 @@ void vb2_buffer_done(struct vb2_buffer *vb, enum vb2_buffer_state state)
 	    state == VB2_BUF_STATE_REQUEUEING) {
 		vb->state = VB2_BUF_STATE_QUEUED;
 	} else {
-		/* Add the buffer to the done buffers list */
-		list_add_tail(&vb->done_entry, &q->done_list);
-		vb->state = state;
+		if (!vb->fences) {
+			/* Add the buffer to the done buffers list */
+			list_add_tail(&vb->done_entry, &q->done_list);
+			
+			vb->state = state;
+		} else {
+			switch (vb->state) {
+			case VB2_BUF_STATE_FENCES_WAITING:
+				/* do nothing, state will be changed after signal fences */
+				break;
+			case VB2_BUF_STATE_FENCES_DEQUEUED:
+				vb->state = VB2_BUF_STATE_DEQUEUED;
+				break;
+			default:
+				vb->state = state;
+			}
+		}
 	}
 	atomic_dec(&q->owned_by_drv_count);
 	spin_unlock_irqrestore(&q->done_lock, flags);
@@ -936,8 +1054,12 @@ void vb2_buffer_done(struct vb2_buffer *vb, enum vb2_buffer_state state)
 			__enqueue_in_driver(vb);
 		return;
 	default:
+		if (IS_ENABLED(CONFIG_VIDEOBUF2_FENCE) && vb->fences)
+			schedule_work(&vb->signal_work);
+
 		/* Inform any processes that may be waiting for buffers */
-		wake_up(&q->done_wq);
+		if (!vb->fences)
+			wake_up(&q->done_wq);
 		break;
 	}
 }
@@ -1220,12 +1342,89 @@ err:
 }
 
 /**
- * __enqueue_in_driver() - enqueue a vb2_buffer in driver for processing
+ * __fence_attach() - Attach a dma-buf fence to a plane
  */
-static void __enqueue_in_driver(struct vb2_buffer *vb)
+static int __fence_attach(struct vb2_plane *p, enum v4l2_buf_type type)
+{
+	struct reservation_object *resv = p->dbuf->resv;
+	struct dma_fence *fence;
+	int ret;
+
+	ww_mutex_lock(&resv->lock, NULL);
+
+	fence = vb2_fence_alloc(p->fence_context,
+				atomic_add_return(1, &p->fence_seqno));
+	if (!fence) {
+		ret = -ENOMEM;
+		goto err_mutex;
+	}
+
+	if (V4L2_TYPE_IS_OUTPUT(type)) {
+		ret = reservation_object_reserve_shared(resv);
+		if (ret < 0) {
+			dprintk(1, "Reserve space for shared fence failed: %d\n", ret);
+			goto err_mutex;
+		}
+		reservation_object_add_shared_fence(resv, fence);
+	} else {
+		reservation_object_add_excl_fence(resv, fence);
+	}
+
+	p->pending_fence = dma_fence_get(fence);
+
+err_mutex:
+	ww_mutex_unlock(&resv->lock);
+
+	return ret;
+}
+
+/**
+ * __get_plane_fence() - get pending fence for a plane
+ */
+static struct dma_fence *__get_plane_fence(struct vb2_plane *p,
+					   enum v4l2_buf_type type)
+{
+	struct reservation_object *resv;
+	struct reservation_object_list *fobj;
+	struct dma_fence *fence;
+	int i;
+
+	if (!p->dbuf)
+		return NULL;
+
+	resv = p->dbuf->resv;
+
+	if (V4L2_TYPE_IS_OUTPUT(type)) {
+		fence = reservation_object_get_excl(resv);
+		if (fence && !dma_fence_is_signaled(fence) &&
+		    fence->context != p->fence_context)
+			return dma_fence_get(fence);
+
+		return NULL;
+	} else {
+		fobj = reservation_object_get_list(resv);
+
+		if (!fobj)
+			return NULL;
+
+		for (i = 0; i < fobj->shared_count; i++) {
+			fence = rcu_dereference_protected(fobj->shared[i],
+						 reservation_object_held(resv));
+			if (!dma_fence_is_signaled(fence) &&
+			    fence->context != p->fence_context)
+				return dma_fence_get(fence);
+		}
+
+		return NULL;
+	}
+}
+
+static void __do_enqueue_in_driver(struct vb2_buffer *vb)
 {
 	struct vb2_queue *q = vb->vb2_queue;
+	unsigned long flags;
 	unsigned int plane;
+	bool attached_fences = false;
 
 	vb->state = VB2_BUF_STATE_ACTIVE;
 	atomic_inc(&q->owned_by_drv_count);
@@ -1233,10 +1432,90 @@ static void __enqueue_in_driver(struct vb2_buffer *vb)
 	trace_vb2_buf_queue(q, vb);
 
 	/* sync buffers */
-	for (plane = 0; plane < vb->num_planes; ++plane)
+	for (plane = 0; plane < vb->num_planes; ++plane) {
 		call_void_memop(vb, prepare, vb->planes[plane].mem_priv);
 
+		if (IS_ENABLED(CONFIG_VIDEOBUF2_FENCE) && vb->fences &&
+		    vb->planes[plane].dbuf) {
+			__fence_attach(&vb->planes[plane], q->type);
+			attached_fences = true;
+		}
+	}
+
 	call_void_vb_qop(vb, buf_queue, vb);
+
+	if (attached_fences) {
+		spin_lock_irqsave(&q->done_lock, flags);
+		vb->state = VB2_BUF_STATE_FENCES;
+
+		list_add_tail(&vb->done_entry, &q->done_list);
+		spin_unlock_irqrestore(&q->done_lock, flags);
+		wake_up(&q->done_wq);
+	}
+}
+
+static void vb2_fence_enqueue_cb(struct dma_fence *f, struct dma_fence_cb *cb)
+{
+	struct vb2_buffer *vb = container_of(cb, struct vb2_buffer, cb);
+	struct vb2_queue *q = vb->vb2_queue;
+
+	dma_fence_put(vb->pending_fence);
+	vb->pending_fence = NULL;
+
+	if (q->start_streaming_called)
+		__do_enqueue_in_driver(vb);
+}
+
+/**
+ * __enqueue_in_driver() - enqueue a vb2_buffer in driver for processing
+ */
+static void __enqueue_in_driver(struct vb2_buffer *vb)
+{
+	struct vb2_queue *q = vb->vb2_queue;
+	struct dma_fence_array *array;
+	unsigned int plane;
+	int ret;
+	int i;
+
+	if (IS_ENABLED(CONFIG_VIDEOBUF2_FENCE) && vb->fences) {
+		for (plane = 0; plane < vb->num_planes; plane++) {
+			vb->fences_array[plane] =
+				__get_plane_fence(&vb->planes[plane], q->type);
+			if (!vb->fences_array[plane]) {
+				for (i = 0; i < plane; i++)
+					dma_fence_put(vb->fences_array[i]);
+				goto enqueue;
+			}
+		}
+
+		array = dma_fence_array_create(vb->num_planes, vb->fences_array,
+					       vb->fence_context,
+					       atomic_add_return(1, &vb->fence_seqno), false);
+		if (!array)
+			goto err_put_fences;
+
+		ret = dma_fence_add_callback(&array->base, &vb->cb,
+					     vb2_fence_enqueue_cb);
+
+		if (ret == -ENOENT)
+			goto enqueue;
+
+		vb->pending_fence = dma_fence_get(&array->base);
+
+		if (ret)
+			goto err_put_fences;
+
+		return;
+	} else {
+	enqueue:
+		return __do_enqueue_in_driver(vb);
+	}
+
+err_put_fences:
+	for (plane = 0; plane < vb->num_planes; plane++)
+		dma_fence_put(vb->fences_array[plane]);
+	kfree(array);
+	dprintk(1, "creating fence array failed for vb %d\n", vb->index);
 }
 
 static int __buf_prepare(struct vb2_buffer *vb, const void *pb)
@@ -1260,6 +1539,24 @@ static int __buf_prepare(struct vb2_buffer *vb, const void *pb)
 		break;
 	case VB2_MEMORY_DMABUF:
 		ret = __qbuf_dmabuf(vb, pb);
+		break;
+	case VB2_BUF_STATE_FENCES:
+		dprintk(1, "buffer %d is already queued in the driver\n",
+			vb->index);
+		return -EINVAL;
+	case VB2_BUF_STATE_FENCES_DEQUEUED:
+		dprintk(1, "attempt to enqueue an already queued buffer\n");
+		vb->state = VB2_BUF_STATE_FENCES_WAITING;
+
+		call_void_qop(q, wait_prepare, q);
+		ret = wait_for_completion_interruptible(&vb->buffer_done);
+		call_void_qop(q, wait_finish, q);
+
+		if (ret)
+			return ret;
+		ret = __buf_prepare(vb, pb);
+		if (ret)
+			return ret;
 		break;
 	default:
 		WARN(1, "Invalid queue type\n");
@@ -1379,6 +1676,24 @@ int vb2_core_qbuf(struct vb2_queue *q, unsigned int index, void *pb)
 	case VB2_BUF_STATE_PREPARING:
 		dprintk(1, "buffer still being prepared\n");
 		return -EINVAL;
+	case VB2_BUF_STATE_FENCES:
+		dprintk(1, "buffer %d is already queued in the driver\n",
+			vb->index);
+		return -EINVAL;
+	case VB2_BUF_STATE_FENCES_DEQUEUED:
+		dprintk(1, "attempt to enqueue an already queued buffer\n");
+		vb->state = VB2_BUF_STATE_FENCES_WAITING;
+
+		call_void_qop(q, wait_prepare, q);
+		ret = wait_for_completion_interruptible(&vb->buffer_done);
+		call_void_qop(q, wait_finish, q);
+
+		if (ret)
+			return ret;
+		ret = __buf_prepare(vb, pb);
+		if (ret)
+			return ret;
+		break;
 	default:
 		dprintk(1, "invalid buffer state %d\n", vb->state);
 		return -EINVAL;
@@ -1559,22 +1874,25 @@ EXPORT_SYMBOL_GPL(vb2_wait_for_all_buffers);
 static void __vb2_dqbuf(struct vb2_buffer *vb)
 {
 	struct vb2_queue *q = vb->vb2_queue;
-	unsigned int i;
+	unsigned long flags;
 
 	/* nothing to do if the buffer is already dequeued */
 	if (vb->state == VB2_BUF_STATE_DEQUEUED)
 		return;
 
-	vb->state = VB2_BUF_STATE_DEQUEUED;
+	spin_lock_irqsave(&q->done_lock, flags);
+
+	if (vb->state != VB2_BUF_STATE_FENCES)
+		vb->state = VB2_BUF_STATE_DEQUEUED;
+	else
+		vb->state = VB2_BUF_STATE_FENCES_DEQUEUED;
+
+	spin_unlock_irqrestore(&q->done_lock, flags);
 
 	/* unmap DMABUF buffer */
-	if (q->memory == VB2_MEMORY_DMABUF)
-		for (i = 0; i < vb->num_planes; ++i) {
-			if (!vb->planes[i].dbuf_mapped)
-				continue;
-			call_void_memop(vb, unmap_dmabuf, vb->planes[i].mem_priv);
-			vb->planes[i].dbuf_mapped = 0;
-		}
+	if (q->memory == V4L2_MEMORY_DMABUF &&
+	    !(IS_ENABLED(CONFIG_VIDEOBUF2_FENCE) && vb->fences))
+		__vb2_unmap_dmabuf(vb);
 }
 
 int vb2_core_dqbuf(struct vb2_queue *q, unsigned int *pindex, void *pb,
@@ -1589,6 +1907,7 @@ int vb2_core_dqbuf(struct vb2_queue *q, unsigned int *pindex, void *pb,
 
 	switch (vb->state) {
 	case VB2_BUF_STATE_DONE:
+	case VB2_BUF_STATE_FENCES:
 		dprintk(3, "returning done buffer\n");
 		break;
 	case VB2_BUF_STATE_ERROR:
@@ -1633,7 +1952,7 @@ EXPORT_SYMBOL_GPL(vb2_core_dqbuf);
  */
 static void __vb2_queue_cancel(struct vb2_queue *q)
 {
-	unsigned int i;
+	unsigned int i, plane;
 
 	/*
 	 * Tell driver to stop all transactions and release all queued
@@ -1689,6 +2008,15 @@ static void __vb2_queue_cancel(struct vb2_queue *q)
 			vb->state = VB2_BUF_STATE_PREPARED;
 			call_void_vb_qop(vb, buf_finish, vb);
 		}
+
+		if (vb->pending_fence) {
+			dma_fence_remove_callback(vb->pending_fence, &vb->cb);
+			for (plane = 0; plane < vb->num_planes; plane++)
+				dma_fence_put(vb->fences_array[plane]);
+			dma_fence_put(vb->pending_fence);
+			vb->pending_fence = NULL;
+		}
+		
 		__vb2_dqbuf(vb);
 	}
 }
@@ -1865,6 +2193,9 @@ int vb2_core_expbuf(struct vb2_queue *q, int *fd, unsigned int type,
 		return ret;
 	}
 
+	if (IS_ENABLED(CONFIG_VIDEOBUF2_FENCE) && vb->fences)
+		vb_plane->dbuf = dbuf;
+
 	dprintk(3, "buffer %d, plane %d exported as %d descriptor\n",
 		index, plane, ret);
 	*fd = ret;
@@ -1936,6 +2267,9 @@ int vb2_mmap(struct vb2_queue *q, struct vm_area_struct *vma)
 	if (ret)
 		return ret;
 
+	if (IS_ENABLED(CONFIG_VIDEOBUF2_FENCE) && vb->fences)
+		vb->fences = false;
+
 	dprintk(3, "buffer %d, plane %d successfully mapped\n", buffer, plane);
 	return 0;
 }
@@ -1988,6 +2322,9 @@ int vb2_core_queue_init(struct vb2_queue *q)
 	    WARN_ON(!q->ops->buf_queue))
 		return -EINVAL;
 
+	if (IS_ENABLED(CONFIG_VIDEOBUF2_FENCE))
+		q->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
+
 	INIT_LIST_HEAD(&q->queued_list);
 	INIT_LIST_HEAD(&q->done_list);
 	spin_lock_init(&q->done_lock);
@@ -2019,6 +2356,7 @@ unsigned int vb2_core_poll(struct vb2_queue *q, struct file *file,
 	unsigned long req_events = poll_requested_events(wait);
 	struct vb2_buffer *vb = NULL;
 	unsigned long flags;
+	int ret = 0;
 
 	if (!q->is_output && !(req_events & (POLLIN | POLLRDNORM)))
 		return 0;
@@ -2087,15 +2425,17 @@ unsigned int vb2_core_poll(struct vb2_queue *q, struct file *file,
 	if (!list_empty(&q->done_list))
 		vb = list_first_entry(&q->done_list, struct vb2_buffer,
 					done_entry);
-	spin_unlock_irqrestore(&q->done_lock, flags);
 
 	if (vb && (vb->state == VB2_BUF_STATE_DONE
-			|| vb->state == VB2_BUF_STATE_ERROR)) {
-		return (q->is_output) ?
-				POLLOUT | POLLWRNORM :
-				POLLIN | POLLRDNORM;
+			|| vb->state == VB2_BUF_STATE_ERROR
+			|| vb->state == VB2_BUF_STATE_FENCES)) {
+		if (q->is_output)
+			ret = POLLOUT | POLLWRNORM;
+		else
+			ret = POLLIN | POLLRDNORM;
 	}
-	return 0;
+	spin_unlock_irqrestore(&q->done_lock, flags);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(vb2_core_poll);
 
