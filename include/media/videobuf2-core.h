@@ -165,6 +165,9 @@ struct vb2_mem_ops {
  *		@fd).
  * @data_offset:	offset in the plane to the start of data; usually 0,
  *		unless there is a header in front of the data
+ * @fence_context: context for planes fences
+ * @fence_seqno: sequence number used for planes fences
+ * @pending_fence: stores fence that has to be signaled when buffer is done
  * Should contain enough information to be able to cover all the fields
  * of struct v4l2_plane at videodev2.h
  */
@@ -181,6 +184,9 @@ struct vb2_plane {
 		int		fd;
 	} m;
 	unsigned int		data_offset;
+	u64			fence_context;
+	atomic_t		fence_seqno;
+	struct dma_fence	*pending_fence;
 };
 
 /**
@@ -213,6 +219,11 @@ enum vb2_io_modes {
  * @VB2_BUF_STATE_ERROR:	same as above, but the operation on the buffer
  *				has ended with an error, which will be reported
  *				to the userspace when it is dequeued
+ * @VB2_BUF_STATE_FENCES:	buffer has fences attached so it can be dequeued
+ * 				even while still queued in driver
+ * @VB2_BUF_STATE_FENCES_DEQUEUED: buffer dequeued but still queued in driver
+ * @VB2_BUF_STATE_FENCES_WAITING: buffer dequeued while queued in driver has been
+ *				  tried to be queued in videobuf again
  */
 enum vb2_buffer_state {
 	VB2_BUF_STATE_DEQUEUED,
@@ -223,6 +234,9 @@ enum vb2_buffer_state {
 	VB2_BUF_STATE_ACTIVE,
 	VB2_BUF_STATE_DONE,
 	VB2_BUF_STATE_ERROR,
+	VB2_BUF_STATE_FENCES,
+	VB2_BUF_STATE_FENCES_DEQUEUED,
+	VB2_BUF_STATE_FENCES_WAITING,
 };
 
 struct vb2_queue;
@@ -289,6 +303,16 @@ struct vb2_buffer {
 	/* This counts the number of calls to vb2_buffer_done() */
 	u32		cnt_buf_done;
 #endif
+	/* These are needed to have implicit dma-buf fences support */
+	u64                     fence_context;
+	atomic_t                fence_seqno;
+	struct dma_fence_cb     cb;
+	struct dma_fence        **fences_array;
+	struct dma_fence	*pending_fence;
+	bool			fences;
+
+	struct work_struct      signal_work;
+	struct completion	buffer_done;
 };
 
 /**
