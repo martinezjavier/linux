@@ -1185,3 +1185,22 @@
 &xxti {
 	clock-frequency = <24000000>;
 };
+
+/*
+ * FIXME: Following touchscreen node is temporal before applying the
+ * touchscreen patch on mainline.
+ */
+&hsi2c_5 {
+	status = "okay";
+
+	touchscreen@49 {
+		compatible = "stm,fts_touch";
+		reg = <0x49>;
+		interrupt-parent = <&gpa1>;
+		interrupts = <1 IRQ_TYPE_NONE>;
+		x-size = <1439>;
+		y-size = <2559>;
+		vdd-supply = <&ldo31_reg>;
+		avdd-supply = <&ldo30_reg>;
+	};
+};
