@@ -21,15 +21,22 @@
 #ifndef _DT_BINDINGS_MEDIA_TVP5150_H
 #define _DT_BINDINGS_MEDIA_TVP5150_H
 
-/* TVP5150 HW inputs */
+/* TVP5150 inputs */
 #define TVP5150_COMPOSITE0 0
 #define TVP5150_COMPOSITE1 1
 #define TVP5150_SVIDEO     2
 
 #define TVP5150_INPUT_NUM  3
 
-/* TVP5150 HW outputs */
+/* TVP5150 outputs */
 #define TVP5150_NORMAL       0
 #define TVP5150_BLACK_SCREEN 1
+
+/* TVP5150 HW ports */
+#define TVP5150_PORT_AIP1A 0
+#define TVP5150_PORT_AIP1B 1
+#define TVP5150_PORT_DOUT  2
+
+#define TVP5150_PORT_NUM  3
 
 #endif /* _DT_BINDINGS_MEDIA_TVP5150_H */

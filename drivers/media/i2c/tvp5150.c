@@ -1353,97 +1353,107 @@ static int tvp5150_init(struct i2c_client *c)
 	return 0;
 }
 
-static int tvp5150_parse_dt(struct tvp5150 *decoder, struct device_node *np)
+static int tvp5150_set_output_bus_type(struct tvp5150 *decoder,
+				       struct v4l2_fwnode_endpoint *endpoint)
 {
-	struct v4l2_fwnode_endpoint bus_cfg;
-	struct device_node *ep;
-#ifdef CONFIG_MEDIA_CONTROLLER
-	struct device_node *connectors, *child;
-	struct media_entity *input;
-	const char *name;
-	u32 input_type;
-#endif
 	unsigned int flags;
-	int ret = 0;
 
-	ep = of_graph_get_next_endpoint(np, NULL);
-	if (!ep)
-		return -EINVAL;
+	flags = endpoint->bus.parallel.flags;
 
-	ret = v4l2_fwnode_endpoint_parse(of_fwnode_handle(ep), &bus_cfg);
-	if (ret)
-		goto err;
-
-	flags = bus_cfg.bus.parallel.flags;
-
-	if (bus_cfg.bus_type == V4L2_MBUS_PARALLEL &&
+	if (endpoint->bus_type == V4L2_MBUS_PARALLEL &&
 	    !(flags & V4L2_MBUS_HSYNC_ACTIVE_HIGH &&
 	      flags & V4L2_MBUS_VSYNC_ACTIVE_HIGH &&
 	      flags & V4L2_MBUS_FIELD_EVEN_LOW)) {
-		ret = -EINVAL;
-		goto err;
+		return -EINVAL;
 	}
 
-	decoder->mbus_type = bus_cfg.bus_type;
+	decoder->mbus_type = endpoint->bus_type;
+	printk("%s there's a new output entity found\n", __func__);
 
-#ifdef CONFIG_MEDIA_CONTROLLER
-	connectors = of_get_child_by_name(np, "connectors");
+	return 0;
+}
 
-	if (!connectors)
-		goto err;
-
-	for_each_available_child_of_node(connectors, child) {
-		ret = of_property_read_u32(child, "input", &input_type);
-		if (ret) {
-			dev_err(decoder->sd.dev,
-				 "missing type property in node %s\n",
-				 child->name);
-			goto err_connector;
-		}
-
-		if (input_type >= TVP5150_INPUT_NUM) {
-			ret = -EINVAL;
-			goto err_connector;
-		}
-
-		input = &decoder->input_ent[input_type];
-
-		/* Each input connector can only be defined once */
-		if (input->name) {
-			dev_err(decoder->sd.dev,
-				 "input %s with same type already exists\n",
-				 input->name);
-			ret = -EINVAL;
-			goto err_connector;
-		}
-
-		switch (input_type) {
-		case TVP5150_COMPOSITE0:
-		case TVP5150_COMPOSITE1:
-			input->function = MEDIA_ENT_F_CONN_COMPOSITE;
-			break;
-		case TVP5150_SVIDEO:
-			input->function = MEDIA_ENT_F_CONN_SVIDEO;
-			break;
-		}
-
-		input->flags = MEDIA_ENT_FL_CONNECTOR;
-
-		ret = of_property_read_string(child, "label", &name);
-		if (ret < 0) {
-			dev_err(decoder->sd.dev,
-				 "missing label property in node %s\n",
-				 child->name);
-			goto err_connector;
-		}
-
-		input->name = name;
-	}
-
-err_connector:
-	of_node_put(connectors);
+static int tvp5150_parse_dt(struct tvp5150 *decoder, struct device_node *np)
+{
+	struct device_node *ep = NULL;
+	struct v4l2_fwnode_endpoint endpoint;
+	unsigned int port;
+#if defined(CONFIG_MEDIA_CONTROLLER)
+	struct device_node *rp;
+	bool svideo_found = false;
+	struct media_entity *input;
+	const char *name;
 #endif
-err:
+	int ret = 0;
+
+	printk("%s parsing port endpoints...\n", __func__);
+
+	while ((ep = of_graph_get_next_endpoint(np, ep))) {
+		ret =  v4l2_fwnode_endpoint_parse(of_fwnode_handle(ep),
+						  &endpoint);
+		if (ret)
+			goto ep_put;
+
+		port = endpoint.base.port;
+
+		printk("%s found an endpoint for port %d!\n", __func__, port);
+
+		if (port >= TVP5150_PORT_NUM) {
+			ret = -EINVAL;
+			goto ep_put;
+		}
+
+		if (port == 0) { /* Output port */
+			ret = tvp5150_set_output_bus_type(decoder, &endpoint);
+			if (ret)
+				goto ep_put;
+			continue;
+		}
+
+#if defined(CONFIG_MEDIA_CONTROLLER)
+		input = NULL;
+
+		rp = of_graph_get_remote_port_parent(ep);
+		if (!rp) {
+			printk("%s remote nout found!!!\n", __func__);
+			ret = -EINVAL;
+			goto ep_put;
+		}
+
+		if (of_device_is_compatible(rp, "composite-video-connector")) {
+			input = &decoder->input_ent[port - 1];
+			input->function = MEDIA_ENT_F_CONN_COMPOSITE;
+		} else if (of_device_is_compatible(rp, "svideo-connector")) {
+			printk("%s found a S-video endpoint!\n", __func__);
+			if (svideo_found) {
+				/* Only register S-Video if two ports found */
+				input = &decoder->input_ent[TVP5150_SVIDEO];
+				input->function = MEDIA_ENT_F_CONN_SVIDEO;
+			} else {
+				svideo_found = true;
+			}
+		}
+
+		if (input) {
+			input->flags = MEDIA_ENT_FL_CONNECTOR;
+			ret = of_property_read_string(rp, "label", &name);
+			if (ret < 0) {
+				v4l2_err(&decoder->sd,
+					 "Missing label property in port %s\n",
+					 rp->full_name);
+				of_node_put(rp);
+				goto ep_put;
+			}
+
+			input->name = name;
+			printk("%s there's a new input entity with name %s\n",
+			       __func__, name);
+		}
+		of_node_put(rp);
+#endif
+	}
+
+ep_put:
 	of_node_put(ep);
 	return ret;
 }
