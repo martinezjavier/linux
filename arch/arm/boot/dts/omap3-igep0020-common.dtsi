@@ -87,7 +87,7 @@
 		};
 	};
 
-	dvi0: connector {
+	dvi0: connector@0 {
 		compatible = "dvi-connector";
 		label = "dvi";
 
@@ -101,6 +101,61 @@
 			};
 		};
 	};
+
+	composite0: connector@1 {
+		compatible = "composite-video-connector";
+		label = "Composite0";
+		reg = <1>;
+
+		port {
+			comp0_out: endpoint {
+				remote-endpoint = <&aip1a_comp_in>;
+			};
+		};
+	};
+
+	composite1: connector@2 {
+		compatible = "composite-video-connector";
+		label = "Composite1";
+		reg = <2>;
+
+		port {
+			comp1_out: endpoint {
+				remote-endpoint = <&aip1b_comp_in>;
+			};
+
+		};
+	};
+
+	svideo: connector@3 {
+		compatible = "svideo-connector";
+		label = "S-Video";
+		reg = <3>;
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+
+				svideo_y_out: endpoint {
+					remote-endpoint = <&aip1a_svideo_y_in>;
+				};
+
+			};
+
+			port@1 {
+				reg = <1>;
+
+				svideo_c_out: endpoint {
+					remote-endpoint = <&aip1b_svideo_c_in>;
+				};
+
+			};
+		};
+	};
+
 };
 
 &omap3_pmx_core {
@@ -108,12 +163,46 @@
 	pinctrl-0 = <
 		&tfp410_pins
 		&dss_dpi_pins
+		&cam_pins
+		&tvp5150_pins
 	>;
 
 	tfp410_pins: pinmux_tfp410_pins {
 		pinctrl-single,pins = <
 			OMAP3_CORE1_IOPAD(0x21c6, PIN_OUTPUT | MUX_MODE4)   /* hdq_sio.gpio_170 */
 		>;
+	};
+
+	tvp5150_pins: pinmux_tvp5150_pins {
+		pinctrl-single,pins = <
+			OMAP3_CORE1_IOPAD(0x2130, PIN_OUTPUT | MUX_MODE4) /* ccdc_wen.gpio167 - tvp5150 reset pin */
+			OMAP3_CORE1_IOPAD(0x2132, PIN_OUTPUT | MUX_MODE4) /* cam_strobe.gpio126 - tvp5150 power down pin*/
+		>;
+	};
+ 
+	cam_pins: pinmux_cam_pins {
+		pinctrl-single,pins = <
+			OMAP3_CORE1_IOPAD(0x210c, PIN_INPUT | MUX_MODE0)  /* cam_hs.cam_hs */
+			OMAP3_CORE1_IOPAD(0x210e, PIN_INPUT | MUX_MODE0)  /* cam_vs.cam_vs */
+			OMAP3_CORE1_IOPAD(0x2110, PIN_OUTPUT| MUX_MODE0)  /* cam_xclka.cam_xclka */
+			OMAP3_CORE1_IOPAD(0x2112, PIN_INPUT | MUX_MODE0)  /* cam_pclk.cam_pclk */
+			OMAP3_CORE1_IOPAD(0x2114, PIN_INPUT | MUX_MODE4)  /* cam_fld.gpio98 */
+			OMAP3_CORE1_IOPAD(0x2116, PIN_INPUT | MUX_MODE0)  /* cam_d0.cam_d0 */
+			OMAP3_CORE1_IOPAD(0x2118, PIN_INPUT | MUX_MODE0)  /* cam_d1.cam_d1 */
+			OMAP3_CORE1_IOPAD(0x211a, PIN_INPUT | MUX_MODE0)  /* cam_d2.cam_d2 */
+			OMAP3_CORE1_IOPAD(0x211c, PIN_INPUT | MUX_MODE0)  /* cam_d3.cam_d3 */
+			OMAP3_CORE1_IOPAD(0x211e, PIN_INPUT | MUX_MODE0)  /* cam_d4.cam_d4 */
+			OMAP3_CORE1_IOPAD(0x2120, PIN_INPUT | MUX_MODE0)  /* cam_d5.cam_d5 */
+			OMAP3_CORE1_IOPAD(0x2122, PIN_INPUT | MUX_MODE0)  /* cam_d6.cam_d6 */
+			OMAP3_CORE1_IOPAD(0x2124, PIN_INPUT | MUX_MODE0)  /* cam_d7.cam_d7 */
+			OMAP3_CORE1_IOPAD(0x2126, PIN_INPUT | MUX_MODE0)  /* cam_d8.cam_d8 */
+			OMAP3_CORE1_IOPAD(0x2128, PIN_INPUT | MUX_MODE0)  /* cam_d9.cam_d9 */
+			OMAP3_CORE1_IOPAD(0x212a, PIN_INPUT | MUX_MODE0)  /* cam_d10.cam_d10 */
+			OMAP3_CORE1_IOPAD(0x212c, PIN_INPUT | MUX_MODE0)  /* cam_d11.cam_d11 */
+			OMAP3_CORE1_IOPAD(0x212e, PIN_INPUT | MUX_MODE4)  /* cam_xclkb.gpio111 */
+			/* OMAP3_CORE1_IOPAD(0x2130, PIN_INPUT | MUX_MODE0)   cam_wen.cam_wen */
+			/* OMAP3_CORE1_IOPAD(0x2132, PIN_INPUT | MUX_MODE0)   cam_strobe.cam_strobe */
+			>;
 	};
 
 	dss_dpi_pins: pinmux_dss_dpi_pins {
@@ -203,6 +292,63 @@
 	};
 };
 
+&i2c2 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c2_pins>;
+
+	clock-frequency = <400000>;
+
+	tvp5150@5c {
+		compatible = "ti,tvp5150";
+		reg = <0x5c>;
+		pinctrl-0 = <&tvp5150_pins>;
+		pdn-gpios = <&gpio4 30 GPIO_ACTIVE_LOW>;
+		reset-gpios = <&gpio6 7 GPIO_ACTIVE_LOW>;
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+				tvp5150_out: endpoint {
+					remote-endpoint = <&ccdc_ep>;
+				};
+			};
+
+			port@1 {
+				#address-cells = <1>;
+				#size-cells = <0>;
+				reg = <1>;
+				aip1a_comp_in: endpoint@0 {
+					reg = <0>;
+					remote-endpoint = <&comp0_out>;
+				};
+
+				aip1a_svideo_y_in: endpoint@1 {
+					reg = <1>;
+					remote-endpoint = <&svideo_y_out>;
+				};
+			};
+
+			port@2 {
+				#address-cells = <1>;
+				#size-cells = <0>;
+				reg = <2>;
+				aip1b_comp_in: endpoint@0 {
+					reg = <0>;
+					remote-endpoint = <&comp1_out>;
+				};
+
+				aip1b_svideo_c_in: endpoint@1 {
+					reg = <1>;
+					remote-endpoint = <&svideo_c_out>;
+				};
+			};
+		};
+	};
+};
+
 &i2c3 {
 	clock-frequency = <100000>;
 
@@ -213,6 +359,19 @@
 	eeprom@50 {
 		compatible = "ti,eeprom";
 		reg = <0x50>;
+	};
+};
+
+&isp {
+	ports {
+		port@0 {
+			reg = <0>;
+			ccdc_ep: endpoint {
+				remote-endpoint = <&tvp5150_out>;
+				bus-width = <8>;
+				data-shift = <0>;
+			};
+		};
 	};
 };
 
