@@ -26,7 +26,47 @@ Required Endpoint Properties for parallel synchronization:
 If none of hsync-active, vsync-active and field-even-active is specified,
 the endpoint is assumed to use embedded BT.656 synchronization.
 
+-Optional nodes:
+- connectors: The list of tvp5150 input connectors available on a given
+  board. The node should contain a child 'port' node for each connector.
+
+  The tvp5150 has support for three possible connectors: 2 Composite and
+  1 S-video. The "reg" property is used to specify which input connector
+  is associated with each 'port', using the following possible values:
+
+  0: Composite0
+  1: Composite1
+  2: S-Video
+
+  The ports should have an endpoint subnode that is linked to a connector
+  node defined in Documentation/devicetree/bindings/display/connector/.
+  The linked connector compatible string should match the connector type.
+
 Example:
+
+composite0: connector@0 {
+	compatible = "composite-video-connector";
+	label = "Composite0";
+	reg = <0>;
+
+	port {
+		comp0_out: endpoint {
+			remote-endpoint = <&tvp5150_comp0_in>;
+		};
+	};
+};
+
+svideo: connector@1 {
+	compatible = "composite-video-connector";
+	label = "S-Video";
+	reg = <1>;
+
+	port {
+		svideo_out: endpoint {
+			remote-endpoint = <&tvp5150_svideo_in>;
+		};
+	};
+};
 
 &i2c2 {
 	...
@@ -36,8 +76,29 @@ Example:
 		pdn-gpios = <&gpio4 30 GPIO_ACTIVE_LOW>;
 		reset-gpios = <&gpio6 7 GPIO_ACTIVE_LOW>;
 
+		connectors {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			/* Composite0 input */
+			port@0 {
+				reg = <0>;
+				tvp5150_comp0_in: endpoint {
+					remote-endpoint = <&comp0_out>;
+				};
+			};
+
+			/* S-Video input */
+			port@2 {
+				reg = <2>;
+				tvp5150_svideo_in: endpoint {
+					remote-endpoint = <&svideo_out>;
+				};
+			};
+		};
+
 		port {
-			tvp5150_1: endpoint {
+			tvp5150_out: endpoint {
 				remote-endpoint = <&ccdc_ep>;
 			};
 		};
