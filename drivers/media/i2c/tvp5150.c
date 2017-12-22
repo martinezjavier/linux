@@ -43,7 +43,7 @@ struct tvp5150 {
 #ifdef CONFIG_MEDIA_CONTROLLER
 	struct media_pad pads[DEMOD_NUM_PADS];
 	struct media_entity input_ent[TVP5150_INPUT_NUM];
-	struct media_pad input_pad[TVP5150_INPUT_NUM];
+	struct media_pad input_pad[TVP5150_INPUT_NUM + 1]; /* 2 for S-Video */
 #endif
 	struct v4l2_ctrl_handler hdl;
 	struct v4l2_rect rect;
@@ -1189,6 +1189,7 @@ static int tvp5150_registered(struct v4l2_subdev *sd)
 {
 #ifdef CONFIG_MEDIA_CONTROLLER
 	struct tvp5150 *decoder = to_tvp5150(sd);
+	int num_pads;
 	int ret = 0;
 	int i;
 
@@ -1201,7 +1202,14 @@ static int tvp5150_registered(struct v4l2_subdev *sd)
 
 		decoder->input_pad[i].flags = MEDIA_PAD_FL_SOURCE;
 
-		ret = media_entity_pads_init(input, 1, pad);
+		if (i == TVP5150_SVIDEO) {
+			decoder->input_pad[i + 1].flags = MEDIA_PAD_FL_SOURCE;
+			num_pads = 2;
+		} else {
+			num_pads = 1;
+		}
+
+		ret = media_entity_pads_init(input, num_pads, pad);
 		if (ret < 0)
 			return ret;
 
