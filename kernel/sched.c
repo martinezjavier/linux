@@ -16,6 +16,11 @@
  *		by Davide Libenzi, preemptible kernel bits by Robert Love.
  *  2003-09-03	Interactivity tuning by Con Kolivas.
  *  2004-04-02	Scheduler domains code by Nick Piggin
+ *  2005-12-02  Fair Share Scheduling
+		por Javier Martinez
+		  y Roberto Rodriguez Alcala
+
+
  */
 
 #include <linux/mm.h>
@@ -46,28 +51,11 @@
 #include <linux/seq_file.h>
 #include <linux/syscalls.h>
 #include <linux/times.h>
+
 #include <linux/acct.h>
+#include <linux/kprobes.h>
 #include <asm/tlb.h>
-
 #include <asm/unistd.h>
-
-/*
- * Convert user-nice values [ -20 ... 0 ... 19 ]
- * to static priority [ MAX_RT_PRIO..MAX_PRIO-1 ],
- * and back.
- */
-#define NICE_TO_PRIO(nice)	(MAX_RT_PRIO + (nice) + 20)
-#define PRIO_TO_NICE(prio)	((prio) - MAX_RT_PRIO - 20)
-#define TASK_NICE(p)		PRIO_TO_NICE((p)->static_prio)
-
-/*
- * 'User priority' is the nice value converted to something we
- * can work with better when scaling various scheduler parameters,
- * it's a [ 0 ... 39 ] range.
- */
-#define USER_PRIO(p)		((p)-MAX_RT_PRIO)
-#define TASK_USER_PRIO(p)	USER_PRIO((p)->static_prio)
-#define MAX_USER_PRIO		(USER_PRIO(MAX_PRIO))
 
 /*
  * Some helpers for converting nanosecond timing to jiffy resolution
@@ -82,6 +70,7 @@
  * default timeslice is 100 msecs, maximum timeslice is 800 msecs.
  * Timeslices get refilled after they expire.
  */
+#define TIMESLICE		(100 * HZ / 1000)
 #define MIN_TIMESLICE		max(5 * HZ / 1000, 1)
 #define DEF_TIMESLICE		(100 * HZ / 1000)
 #define ON_RUNQUEUE_WEIGHT	 30
@@ -89,39 +78,9 @@
 #define PARENT_PENALTY		100
 #define EXIT_WEIGHT		  3
 #define PRIO_BONUS_RATIO	 25
-#define MAX_BONUS		(MAX_USER_PRIO * PRIO_BONUS_RATIO / 100)
-#define INTERACTIVE_DELTA	  2
 #define MAX_SLEEP_AVG		(DEF_TIMESLICE * MAX_BONUS)
 #define STARVATION_LIMIT	(MAX_SLEEP_AVG)
 #define NS_MAX_SLEEP_AVG	(JIFFIES_TO_NS(MAX_SLEEP_AVG))
-
-/*
- * If a task is 'interactive' then we reinsert it in the active
- * array after it has expired its current timeslice. (it will not
- * continue to run immediately, it will still roundrobin with
- * other interactive tasks.)
- *
- * This part scales the interactivity limit depending on niceness.
- *
- * We scale it linearly, offset by the INTERACTIVE_DELTA delta.
- * Here are a few examples of different nice levels:
- *
- *  TASK_INTERACTIVE(-20): [1,1,1,1,1,1,1,1,1,0,0]
- *  TASK_INTERACTIVE(-10): [1,1,1,1,1,1,1,0,0,0,0]
- *  TASK_INTERACTIVE(  0): [1,1,1,1,0,0,0,0,0,0,0]
- *  TASK_INTERACTIVE( 10): [1,1,0,0,0,0,0,0,0,0,0]
- *  TASK_INTERACTIVE( 19): [0,0,0,0,0,0,0,0,0,0,0]
- *
- * (the X axis represents the possible -5 ... 0 ... +5 dynamic
- *  priority range a task can explore, a value of '1' means the
- *  task is rated interactive.)
- *
- * Ie. nice +19 tasks can never get 'interactive' enough to be
- * reinserted into the active array. And only heavily CPU-hog nice -20
- * tasks will be expired. Default nice 0 tasks are somewhere between,
- * it takes some effort for them to get interactive, but it's not
- * too hard.
- */
 
 #define CURRENT_BONUS(p) \
 	(NS_TO_JIFFIES((p)->sleep_avg) * MAX_BONUS / \
@@ -129,67 +88,64 @@
 
 #define GRANULARITY	(10 * HZ / 1000 ? : 1)
 
-#ifdef CONFIG_SMP
-#define TIMESLICE_GRANULARITY(p)	(GRANULARITY * \
-		(1 << (((MAX_BONUS - CURRENT_BONUS(p)) ? : 1) - 1)) * \
-			num_online_cpus())
-#else
-#define TIMESLICE_GRANULARITY(p)	(GRANULARITY * \
-		(1 << (((MAX_BONUS - CURRENT_BONUS(p)) ? : 1) - 1)))
-#endif
-
 #define SCALE(v1,v1_max,v2_max) \
 	(v1) * (v2_max) / (v1_max)
 
-#define DELTA(p) \
-	(SCALE(TASK_NICE(p), 40, MAX_BONUS) + INTERACTIVE_DELTA)
-
-#define TASK_INTERACTIVE(p) \
-	((p)->prio <= (p)->static_prio - DELTA(p))
-
-#define INTERACTIVE_SLEEP(p) \
-	(JIFFIES_TO_NS(MAX_SLEEP_AVG * \
-		(MAX_BONUS / 2 + DELTA((p)) + 1) / MAX_BONUS - 1))
-
-#define TASK_PREEMPTS_CURR(p, rq) \
-	((p)->prio < (rq)->curr->prio)
-
 /*
- * task_timeslice() scales user-nice values [ -20 ... 0 ... 19 ]
- * to time slice values: [800ms ... 100ms ... 5ms]
- *
- * The higher a thread's priority, the bigger timeslices
- * it gets during one round of execution. But even the lowest
- * priority thread gets MIN_TIMESLICE worth of execution time.
+ * Definicion de un elemento de la lista de grupos
+ * del calendarizador.
  */
-
-#define SCALE_PRIO(x, prio) \
-	max(x * (MAX_PRIO - prio) / (MAX_USER_PRIO/2), MIN_TIMESLICE)
-
-static unsigned int task_timeslice(task_t *p)
+struct grupo_struct
 {
-	if (p->static_prio < NICE_TO_PRIO(0))
-		return SCALE_PRIO(DEF_TIMESLICE*4, p->static_prio);
-	else
-		return SCALE_PRIO(DEF_TIMESLICE, p->static_prio);
-}
-#define task_hot(p, now, sd) ((long long) ((now) - (p)->last_ran)	\
-				< (long long) (sd)->cache_hot_time)
+	/* ID del Grupo */
+	gid_t gid;
+	/* Nodo de la lista en ejecucuion */
+	struct list_head lista;
+	/* Nodo de la lista de todos los grupos */
+	struct list_head lista_completa; 
+	/* Puntero a la lista completa de usuarios del grupo */
+	struct usuario_struct *usuarios_lista_completa;
+	/* Puntero a la lista de usuarios del grupo en ejecucion */
+	struct usuario_struct *usuarios_lista;
+	/* Cantidad de procesos que utilizan el grupo */
+	atomic_t ref;
+	/* Cantidad de usuarios que se encuentran ejecutando procesos */
+	atomic_t usuarios;
 
-/*
- * These are the runqueue data structures:
- */
-
-#define BITMAP_SIZE ((((MAX_PRIO+1+7)/8)+sizeof(long)-1)/sizeof(long))
-
-typedef struct runqueue runqueue_t;
-
-struct prio_array {
-	unsigned int nr_active;
-	unsigned long bitmap[BITMAP_SIZE];
-	struct list_head queue[MAX_PRIO];
+	/* Informacion para la estadistica */
+#ifdef CONFIG_SCHEDSTATS
+	struct sched_info sched_info;
+#endif
 };
 
+struct usuario_struct
+{
+	/* ID del Usuario */
+	uid_t uid;
+	/* Nodo de la lista en ejecucuion */
+	struct list_head lista;
+	/* Nodo de la lista de todos los usuarios */
+	struct list_head lista_completa;
+	/* Puntero a la lista de procesos del usuario en ejecucion */
+	struct task_struct *procesos_lista;
+	/* Cantidad de procesos del usuario en ejecucion */
+	atomic_t procesos;
+	/* Cantidad de procesos que utilizan el usuario */
+	atomic_t ref;
+	
+	/* Informacion para la estadistica */
+#ifdef CONFIG_SCHEDSTATS
+	struct sched_info sched_info;
+#endif
+};
+
+/* Grupo y Usuario 0 (root) utilizado para los hilos del kernel 
+   Estos se declaran estaticamente debido a que se utilizan desde
+   el principio del arranque */
+struct grupo_struct grupo_root;
+struct usuario_struct usuario_root;
+
+typedef struct runqueue runqueue_t;
 /*
  * This is the main, per-CPU runqueue data structure.
  *
@@ -200,14 +156,13 @@ struct prio_array {
 struct runqueue {
 	spinlock_t lock;
 
+	/* Lista enlazada de grupos disponibles para la ejecucion */
+	struct grupo_struct *grupos_lista;
+
 	/*
-	 * nr_running and cpu_load should be in the same cacheline because
-	 * remote CPUs use both these fields when doing load calculation.
+	 * Procesos en ejecucion y cantidad de cambios efectuados.
 	 */
 	unsigned long nr_running;
-#ifdef CONFIG_SMP
-	unsigned long cpu_load[3];
-#endif
 	unsigned long long nr_switches;
 
 	/*
@@ -222,20 +177,11 @@ struct runqueue {
 	unsigned long long timestamp_last_tick;
 	task_t *curr, *idle;
 	struct mm_struct *prev_mm;
-	prio_array_t *active, *expired, arrays[2];
 	int best_expired_prio;
 	atomic_t nr_iowait;
-
-#ifdef CONFIG_SMP
-	struct sched_domain *sd;
-
-	/* For active balancing */
-	int active_balance;
-	int push_cpu;
-
-	task_t *migration_thread;
-	struct list_head migration_queue;
-#endif
+	
+	/* Contador de grupos activos */
+	atomic_t grupos;
 
 #ifdef CONFIG_SCHEDSTATS
 	/* latency stats */
@@ -255,6 +201,9 @@ struct runqueue {
 	/* try_to_wake_up() stats */
 	unsigned long ttwu_cnt;
 	unsigned long ttwu_local;
+
+	/* Bandera de estadisticas en /proc */
+	unsigned short stat;
 #endif
 };
 
@@ -304,23 +253,11 @@ static inline void finish_lock_switch(runqueue_t *rq, task_t *prev)
 #else /* __ARCH_WANT_UNLOCKED_CTXSW */
 static inline int task_running(runqueue_t *rq, task_t *p)
 {
-#ifdef CONFIG_SMP
-	return p->oncpu;
-#else
 	return rq->curr == p;
-#endif
 }
 
 static inline void prepare_lock_switch(runqueue_t *rq, task_t *next)
 {
-#ifdef CONFIG_SMP
-	/*
-	 * We can optimise this out completely for !SMP, because the
-	 * SMP rebalancing from interrupt is the only thing that cares
-	 * here.
-	 */
-	next->oncpu = 1;
-#endif
 #ifdef __ARCH_WANT_INTERRUPTS_ON_CTXSW
 	spin_unlock_irq(&rq->lock);
 #else
@@ -330,20 +267,42 @@ static inline void prepare_lock_switch(runqueue_t *rq, task_t *next)
 
 static inline void finish_lock_switch(runqueue_t *rq, task_t *prev)
 {
-#ifdef CONFIG_SMP
-	/*
-	 * After ->oncpu is cleared, the task can be moved to a different CPU.
-	 * We must ensure this doesn't happen until the switch is completely
-	 * finished.
-	 */
-	smp_wmb();
-	prev->oncpu = 0;
-#endif
+
 #ifndef __ARCH_WANT_INTERRUPTS_ON_CTXSW
 	local_irq_enable();
 #endif
 }
 #endif /* __ARCH_WANT_UNLOCKED_CTXSW */
+
+/* Funcion para decrementar la cantidad de referencias 
+   a un grupo en memoria y borrarlo si esta queda en CERO */
+static void delete_grupo(struct grupo_struct *grupo)
+{
+	/* Si no quedan mas referencias eliminar el grupo */
+	if(atomic_dec_and_test(&grupo->ref) && grupo != &grupo_root)
+	{
+		list_del_init(&grupo->lista_completa);
+		list_del_init(&grupo->lista);
+		kfree(grupo);
+	}
+}
+
+/* Funcion para decrementar la cantidad de referencias 
+   a un usuario en memoria y borrarlo si esta queda en CERO */
+static void delete_usuario(struct usuario_struct *usuario)
+{
+	/* Si no quedan mas referencias eliminar el usuario manteniendo la consistencia de la lista completa */
+	if(atomic_dec_and_test(&usuario->ref) && usuario != &usuario_root)
+	{
+		if(current->grupo->usuarios_lista_completa == usuario)
+		 current->grupo->usuarios_lista_completa = list_entry(usuario->lista_completa.next, struct usuario_struct, lista_completa);
+		if(current->grupo->usuarios_lista_completa == usuario)
+			current->grupo->usuarios_lista_completa = NULL;
+		list_del_init(&usuario->lista_completa);
+		list_del_init(&usuario->lista);
+		kfree(usuario);
+	}
+}
 
 /*
  * task_rq_lock - lock the runqueue a given task resides on and disable
@@ -355,14 +314,9 @@ static inline runqueue_t *task_rq_lock(task_t *p, unsigned long *flags)
 {
 	struct runqueue *rq;
 
-repeat_lock_task:
 	local_irq_save(*flags);
-	rq = task_rq(p);
+	rq = this_rq();
 	spin_lock(&rq->lock);
-	if (unlikely(rq != task_rq(p))) {
-		spin_unlock_irqrestore(&rq->lock, *flags);
-		goto repeat_lock_task;
-	}
 	return rq;
 }
 
@@ -373,73 +327,61 @@ static inline void task_rq_unlock(runqueue_t *rq, unsigned long *flags)
 }
 
 #ifdef CONFIG_SCHEDSTATS
-/*
- * bump this up when changing the output format or the meaning of an existing
- * format, so that tools can adapt (or abort)
- */
-#define SCHEDSTAT_VERSION 12
 
+/*
+ * Imprimir un informe acerca de los procesos del sistema segun las listas del calendarizador
+ *
+ */
 static int show_schedstat(struct seq_file *seq, void *v)
 {
-	int cpu;
+	
+	runqueue_t *rq = this_rq();
+	
+	rq->stat = 1;
 
-	seq_printf(seq, "version %d\n", SCHEDSTAT_VERSION);
-	seq_printf(seq, "timestamp %lu\n", jiffies);
-	for_each_online_cpu(cpu) {
-		runqueue_t *rq = cpu_rq(cpu);
-#ifdef CONFIG_SMP
-		struct sched_domain *sd;
-		int dcnt = 0;
-#endif
+	struct task_struct *tsk;
 
-		/* runqueue-specific stats */
-		seq_printf(seq,
-		    "cpu%d %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu",
-		    cpu, rq->yld_both_empty,
-		    rq->yld_act_empty, rq->yld_exp_empty, rq->yld_cnt,
-		    rq->sched_switch, rq->sched_cnt, rq->sched_goidle,
-		    rq->ttwu_cnt, rq->ttwu_local,
-		    rq->rq_sched_info.cpu_time,
-		    rq->rq_sched_info.run_delay, rq->rq_sched_info.pcnt);
-
-		seq_printf(seq, "\n");
-
-#ifdef CONFIG_SMP
-		/* domain-specific stats */
-		preempt_disable();
-		for_each_domain(cpu, sd) {
-			enum idle_type itype;
-			char mask_str[NR_CPUS];
-
-			cpumask_scnprintf(mask_str, NR_CPUS, sd->span);
-			seq_printf(seq, "domain%d %s", dcnt++, mask_str);
-			for (itype = SCHED_IDLE; itype < MAX_IDLE_TYPES;
-					itype++) {
-				seq_printf(seq, " %lu %lu %lu %lu %lu %lu %lu %lu",
-				    sd->lb_cnt[itype],
-				    sd->lb_balanced[itype],
-				    sd->lb_failed[itype],
-				    sd->lb_imbalance[itype],
-				    sd->lb_gained[itype],
-				    sd->lb_hot_gained[itype],
-				    sd->lb_nobusyq[itype],
-				    sd->lb_nobusyg[itype]);
-			}
-			seq_printf(seq, " %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu\n",
-			    sd->alb_cnt, sd->alb_failed, sd->alb_pushed,
-			    sd->sbe_cnt, sd->sbe_balanced, sd->sbe_pushed,
-			    sd->sbf_cnt, sd->sbf_balanced, sd->sbf_pushed,
-			    sd->ttwu_wake_remote, sd->ttwu_move_affine, sd->ttwu_move_balance);
+	seq_printf(seq, "ESTADISTICAS | Fair share Scheduler\n");
+	if (rq->stat == 1){
+		for_each_process(tsk)
+		{
+			seq_printf(seq,"%s\tPID: %d\tUID: %d\tGID: %d\tEst: %s\tE=%lu\tD=%lu\n",tsk->comm,tsk->pid,tsk->usuario->uid,tsk->grupo->gid,tsk->state ? "DURM" : "EJEC",((tsk->sched_info.cpu_time)*1000)/(tsk->sched_info.cpu_time+tsk->sched_info.run_delay),((tsk->sched_info.run_delay)*1000)/(tsk->sched_info.cpu_time+tsk->sched_info.run_delay));
 		}
-		preempt_enable();
-#endif
+	}else{
+		seq_printf(seq,"No esta habilitada la opcion de estadisticas\n");
 	}
+
 	return 0;
 }
 
+
+static void cerar_stat(void)
+{
+	
+	runqueue_t *rq = this_rq();
+	
+	rq->stat = 1;
+
+	struct task_struct *tsk;
+	preempt_disable();
+	for_each_process(tsk)
+	{
+		tsk->sched_info.run_delay = 1;
+		tsk->sched_info.cpu_time = 0;
+		tsk->usuario->sched_info.run_delay = 1;
+		tsk->usuario->sched_info.cpu_time = 0;
+		
+		tsk->grupo->sched_info.run_delay = 1;
+		tsk->grupo->sched_info.cpu_time = 0;
+	}
+	preempt_enable();
+}
+/*
+* Apertura del archivo de estadisticas,
+*/
 static int schedstat_open(struct inode *inode, struct file *file)
 {
-	unsigned int size = PAGE_SIZE * (1 + num_online_cpus() / 32);
+	unsigned int size = PAGE_SIZE*4;
 	char *buf = kmalloc(size, GFP_KERNEL);
 	struct seq_file *m;
 	int res;
@@ -458,6 +400,87 @@ static int schedstat_open(struct inode *inode, struct file *file)
 
 struct file_operations proc_schedstat_operations = {
 	.open    = schedstat_open,
+	.read    = seq_read,
+	.llseek  = seq_lseek,
+	.release = single_release,
+};
+
+
+static int show_runstat(struct seq_file *seq, void *v)
+{
+
+	runqueue_t *rq = this_rq();
+
+	struct task_struct *tsk;
+	struct grupo_struct *grp;
+	struct usuario_struct *usr;
+
+	struct list_head *task_head;
+	struct list_head *usuario_head;
+	struct list_head *grupo_head;
+
+	int i,j,k;
+
+	seq_printf(seq, "ESTADISTICAS | Fair share Scheduler | En ejecucion\n");
+
+	if(rq->stat == 1){
+		if(likely(rq->grupos_lista)){
+			preempt_disable();
+
+			grupo_head = &rq->grupos_lista->lista;
+			for(i=0;i<atomic_read(&rq->grupos);i++){
+				grp = list_entry(grupo_head,struct grupo_struct, lista);
+				seq_printf(seq,"Grupo   %5d E=%lu D=%lu\n", grp->gid,((grp->sched_info.cpu_time)*10000)/(grp->sched_info.cpu_time+grp->sched_info.run_delay), ((grp->sched_info.run_delay)*10000)/(grp->sched_info.cpu_time+grp->sched_info.run_delay));
+				
+				usuario_head = &grp->usuarios_lista->lista;
+				for(j=0;j<atomic_read(&grp->usuarios);j++){
+					usr = list_entry(usuario_head,struct usuario_struct, lista);
+					seq_printf(seq,"Usuario %5d E=%lu D=%lu\n", usr->uid,((usr->sched_info.cpu_time)*10000)/(usr->sched_info.cpu_time+usr->sched_info.run_delay), ((usr->sched_info.run_delay)*10000)/(usr->sched_info.cpu_time+usr->sched_info.run_delay));
+				
+					task_head = &usr->procesos_lista->run_list;
+					for(k=0;k<atomic_read(&usr->procesos);k++){
+						tsk = list_entry(task_head,struct task_struct, run_list);	
+						seq_printf(seq,"%s\tPID: %5d\tUID: %d\tGID: %d\tEstado: %s\tE=%lu\tD=%lu \n",tsk->comm,tsk->pid,tsk->usuario->uid,tsk->grupo->gid,tsk->state ? "BLOQ" : "EJEC", ((tsk->sched_info.cpu_time)*10000)/(tsk->sched_info.cpu_time+tsk->sched_info.run_delay), ((tsk->sched_info.run_delay)*10000)/(tsk->sched_info.cpu_time+tsk->sched_info.run_delay));	
+						task_head = task_head->next;
+					}
+					usuario_head = usuario_head->next;	
+				}	
+				grupo_head = grupo_head->next;
+			}
+			preempt_enable();
+		}else
+			seq_printf(seq,"No hay procesos en ejecucion\n");
+	}else{
+		seq_printf(seq,"No esta habilitada la opcion de estadisticas\n");	
+	}
+
+	return 0;
+}
+
+/*
+* Apertura del archivo de estadisticas,
+*/
+static int runstat_open(struct inode *inode, struct file *file)
+{
+	unsigned int size = PAGE_SIZE*4;
+	char *buf = kmalloc(size, GFP_KERNEL);
+	struct seq_file *m;
+	int res;
+
+	if (!buf)
+		return -ENOMEM;
+	res = single_open(file, show_runstat, NULL);
+	if (!res) {
+		m = file->private_data;
+		m->buf = buf;
+		m->size = size;
+	} else
+		kfree(buf);
+	return res;
+}
+
+struct file_operations proc_runstat_operations = {
+	.open    = runstat_open,
 	.read    = seq_read,
 	.llseek  = seq_lseek,
 	.release = single_release,
@@ -487,7 +510,7 @@ static inline runqueue_t *this_rq_lock(void)
 
 #ifdef CONFIG_SCHEDSTATS
 /*
- * Called when a process is dequeued from the active array and given
+ * Called when a process is dequeued from the active arr and given
  * the cpu.  We should note that with the exception of interactive
  * tasks, the expired queue will become the active queue after the active
  * queue is empty, without explicitly dequeuing and requeuing tasks in the
@@ -503,7 +526,9 @@ static inline runqueue_t *this_rq_lock(void)
  */
 static inline void sched_info_dequeued(task_t *t)
 {
-	t->sched_info.last_queued = 0;
+	t->sched_info.last_queued = jiffies;
+	t->usuario->sched_info.last_queued = jiffies;
+	t->grupo->sched_info.last_queued = jiffies;
 }
 
 /*
@@ -518,26 +543,34 @@ static inline void sched_info_arrive(task_t *t)
 
 	if (t->sched_info.last_queued)
 		diff = now - t->sched_info.last_queued;
+	
 	sched_info_dequeued(t);
+	
 	t->sched_info.run_delay += diff;
+	t->usuario->sched_info.run_delay += diff; 
+	t->grupo->sched_info.run_delay += diff;
+	
 	t->sched_info.last_arrival = now;
+	t->usuario->sched_info.last_arrival = now;
+	t->grupo->sched_info.last_arrival = now;
+	
 	t->sched_info.pcnt++;
+	t->usuario->sched_info.pcnt++;
+	t->grupo->sched_info.pcnt++;
 
 	if (!rq)
 		return;
-
-	rq->rq_sched_info.run_delay += diff;
-	rq->rq_sched_info.pcnt++;
 }
 
 /*
- * Called when a process is queued into either the active or expired
- * array.  The time is noted and later used to determine how long we
+ * Called when a process is 
+ into either the active or expired
+ * arr.  The time is noted and later used to determine how long we
  * had to wait for us to reach the cpu.  Since the expired queue will
  * become the active queue after active queue is empty, without dequeuing
  * and requeuing any tasks, we are interested in queuing to either. It
  * is unusual but not impossible for tasks to be dequeued and immediately
- * requeued in the same or another array: this can happen in sched_yield(),
+ * requeued in the same or another arr: this can happen in sched_yield(),
  * set_user_nice(), and even load_balance() as it moves tasks from runqueue
  * to runqueue.
  *
@@ -547,8 +580,11 @@ static inline void sched_info_arrive(task_t *t)
  */
 static inline void sched_info_queued(task_t *t)
 {
-	if (!t->sched_info.last_queued)
+	if (!t->sched_info.last_queued){
 		t->sched_info.last_queued = jiffies;
+		t->usuario->sched_info.last_queued = jiffies;
+		t->grupo->sched_info.last_queued = jiffies;
+	}
 }
 
 /*
@@ -557,13 +593,11 @@ static inline void sched_info_queued(task_t *t)
  */
 static inline void sched_info_depart(task_t *t)
 {
-	struct runqueue *rq = task_rq(t);
 	unsigned long diff = jiffies - t->sched_info.last_arrival;
 
 	t->sched_info.cpu_time += diff;
-
-	if (rq)
-		rq->rq_sched_info.cpu_time += diff;
+	t->usuario->sched_info.cpu_time += diff;
+	t->grupo->sched_info.cpu_time += diff;
 }
 
 /*
@@ -582,8 +616,8 @@ static inline void sched_info_switch(task_t *prev, task_t *next)
 	 */
 	if (prev != rq->idle)
 		sched_info_depart(prev);
-
-	if (next != rq->idle)
+	
+	if (next != rq->idle && prev != next)
 		sched_info_arrive(next);
 }
 #else
@@ -592,240 +626,259 @@ static inline void sched_info_switch(task_t *prev, task_t *next)
 #endif /* CONFIG_SCHEDSTATS */
 
 /*
- * Adding/removing a task to/from a priority array:
+ * Crea, inicializa y mantiene los usuarios y la cantidad de
+ * referencias a estos(para mejorar el uso de memoria)
+ * nuid = UID del grupo solicitado
+ * Retorno: Puntero al grupo solicitado.
  */
-static void dequeue_task(struct task_struct *p, prio_array_t *array)
+static struct usuario_struct *init_usuario(int nuid)
 {
-	array->nr_active--;
-	list_del(&p->run_list);
-	if (list_empty(array->queue + p->prio))
-		__clear_bit(p->prio, array->bitmap);
+	/* SI es root retornar la estructura estatica */
+	if(nuid == 0 && current->gid == 0)
+	{
+		atomic_inc(&usuario_root.ref);
+		return &usuario_root;
+	}
+	/* Si la lista completa del grupo esta vacia proceder directamente a crear
+	   sino buscar antes a ver si ya exite el usuario */
+	if(current->grupo->usuarios_lista_completa != NULL)
+	{
+		/* Ver si ya existe la estructura */
+		struct list_head *tmp;
+		struct usuario_struct *grp;
+		if(current->grupo->usuarios_lista_completa->uid == nuid)
+		{
+			atomic_inc(&current->grupo->usuarios_lista_completa->ref);
+			return current->grupo->usuarios_lista_completa;
+		}
+
+		list_for_each(tmp,&current->grupo->usuarios_lista_completa->lista_completa)
+		{
+			grp = list_entry(tmp,struct usuario_struct, lista_completa);
+			if(grp->uid == nuid){
+					atomic_inc(&grp->ref);
+					return grp;
+			}
+		}
+	}
+	/* Si llegamos hasta aca es porque la estructura de este usuario no existe */
+	struct usuario_struct *nueva = kmalloc(sizeof(struct usuario_struct),GFP_KERNEL);
+	if(nueva)
+	{
+		INIT_LIST_HEAD(&nueva->lista);
+		nueva->procesos_lista = NULL;
+		nueva->uid = nuid;
+		atomic_set( &nueva->procesos, 0);
+		INIT_LIST_HEAD(&nueva->lista_completa);
+#ifdef CONFIG_SCHEDSTATS
+		memset(&nueva->sched_info, 0, sizeof(struct sched_info));
+		nueva->sched_info.run_delay = 1;
+#endif
+		if(current->grupo->usuarios_lista_completa != NULL)
+			list_add_tail(&nueva->lista_completa,&current->grupo->usuarios_lista_completa->lista_completa);
+		else
+			current->grupo->usuarios_lista_completa = nueva;
+	}
+	else
+		panic("No se pudo obtener memoria para crear un usuario.");
+	
+	atomic_inc(&nueva->ref);
+	return nueva;
 }
 
-static void enqueue_task(struct task_struct *p, prio_array_t *array)
+EXPORT_SYMBOL(init_usuario);
+
+/*
+ * Crea, inicializa y mantiene los grupos y la cantidad de
+ * referencias a estos(para mejorar el uso de memoria)
+ * ngid = GID del grupo solicitado
+ */
+static struct grupo_struct *init_grupo(int ngid)
 {
-	sched_info_queued(p);
-	list_add_tail(&p->run_list, array->queue + p->prio);
-	__set_bit(p->prio, array->bitmap);
-	array->nr_active++;
-	p->array = array;
+	/* Si se solicita root retornar la direccion de la estructura estatica */
+	if(ngid == 0){
+		atomic_inc(&grupo_root.ref);
+		return &grupo_root;
+	}
+
+	struct list_head *tmp;
+	struct grupo_struct *grp;
+
+	/* Ver si ya existe la estructura */
+	list_for_each(tmp,&grupo_root.lista_completa)
+	{
+		grp = list_entry(tmp,struct grupo_struct, lista_completa);
+		if(grp->gid == ngid){
+			atomic_inc(&grp->ref);
+			return grp;
+		}
+	}
+
+	/* Si llegamos hasta aca es porque la estructura de este grupo no existe */
+	struct grupo_struct *nueva = kmalloc(sizeof(struct grupo_struct),GFP_KERNEL);
+	if(nueva)
+	{
+		nueva->gid = ngid;
+		
+		INIT_LIST_HEAD(&nueva->lista);
+		nueva->usuarios_lista = NULL;
+		atomic_set(&nueva->usuarios, 0);
+	
+		INIT_LIST_HEAD(&nueva->lista_completa);
+		list_add_tail(&nueva->lista_completa,&grupo_root.lista_completa);
+#ifdef CONFIG_SCHEDSTATS
+		memset(&nueva->sched_info, 0, sizeof(struct sched_info));
+		nueva->sched_info.run_delay = 1;
+#endif
+		nueva->usuarios_lista_completa = NULL;
+		atomic_set(&nueva->ref, 1);
+	
+	}else
+		panic("No se pudo obtener memoria para crear un grupo.");
+	return nueva;
+}
+
+EXPORT_SYMBOL(init_grupo);
+
+
+/*
+ *  Eliminar de un proceso de la lista de ejecucion.
+ *
+ *  La eliminacion de un proceso de la lista de ejecucin, se hace en tres partes
+ *  Primero se borra el proceso de la lista de ejecucion
+ *  Segundo se verifica si es el ultimo proceso del usuario y de ser asi se elimina el usuario
+ *  Por ultimo se verifica si es el ultimo usuario del grupo y de ser asi se elimina el grupo
+ */
+static void dequeue_task(struct task_struct *p)
+{
+	runqueue_t *rq = this_rq();
+
+	struct grupo_struct *grupo_actual = p->grupo;
+	struct usuario_struct *user_actual = p->usuario;
+
+	/* Si el proceso actual es la cabeza de la lista del usuario, correr la lista en uno */
+	if(user_actual->procesos_lista == p)
+		user_actual->procesos_lista = list_entry(p->run_list.next, struct task_struct, run_list);
+
+	list_del_init(&p->run_list);
+
+	/* Verificar que queden procesos en la lista del usuario */
+	if(atomic_dec_and_test(&user_actual->procesos))
+	{
+		if(grupo_actual->usuarios_lista == user_actual)
+			grupo_actual->usuarios_lista = list_entry(user_actual->lista.next,struct usuario_struct,lista);
+		
+		list_del_init(&user_actual->lista);
+		user_actual->procesos_lista = NULL;
+		
+		if(atomic_dec_and_test(&grupo_actual->usuarios)){
+			if(rq->grupos_lista == grupo_actual)
+				rq->grupos_lista = list_entry(grupo_actual->lista.next,struct grupo_struct,lista);
+			
+			list_del_init(&grupo_actual->lista);
+			grupo_actual->usuarios_lista = NULL;
+			atomic_dec(&rq->grupos);
+			/* En caso de que no queden mas procesos apuntar la lista de grupos a null
+			   para avisar al calendarizador que debe seleccionar  a "IDLE" */
+			if(rq->grupos_lista == grupo_actual)
+				rq->grupos_lista = NULL;
+		}
+	}
 }
 
 /*
- * Put task to the end of the run list without the overhead of dequeue
- * followed by enqueue.
+ * Insercion de un proceso a la lista de ejecucion
+ *
+ * Para encolar un proceso, primero se verifica si su grupo ya esta en la lista de grupos
+ * y de no ser asi se inserta, luego se ejectua la misma verificacion para el usuario, 
+ * por ultimo insertamos el proceso a la lista de ejecucion 
  */
-static void requeue_task(struct task_struct *p, prio_array_t *array)
+
+static void enqueue_task(struct task_struct *p)
 {
-	list_move_tail(&p->run_list, array->queue + p->prio);
+
+	struct grupo_struct *grupo_head, *grupo_actual = p->grupo;
+	struct usuario_struct *user_actual = p->usuario;
+
+	runqueue_t *rq = this_rq();
+
+	/* Si no habia ningun proceso inicializar la lista completa */
+	if(rq->grupos_lista == NULL)
+	{
+		rq->grupos_lista = grupo_actual;
+		rq->grupos_lista->usuarios_lista = user_actual;
+		rq->grupos_lista->usuarios_lista->procesos_lista = p;
+		atomic_set(&rq->grupos,1);
+		atomic_set(&rq->grupos_lista->usuarios_lista->procesos,1);
+		atomic_set(&rq->grupos_lista->usuarios,1);
+		return;
+	}
+
+	grupo_head = rq->grupos_lista;
+
+	/* Si la lista que queres meter esta vacia y no sos la cabeza a no ser que sea el unico grupo en ejecucion */
+	if(list_empty(&grupo_actual->lista) && rq->grupos_lista != grupo_actual){
+		list_add_tail(&grupo_actual->lista,&grupo_head->lista);
+		atomic_inc(&rq->grupos);
+	}
+	
+	if(unlikely(grupo_actual->usuarios_lista == NULL))
+	{
+		grupo_actual->usuarios_lista = user_actual;
+		atomic_set(&grupo_actual->usuarios,1);
+	}
+	else if(list_empty(&user_actual->lista) && grupo_actual->usuarios_lista != user_actual)
+	{	/* Si la lista que queres meter esta vacia y no sos la cabeza a no ser que sea el unico usuario en ejecucion */
+		list_add_tail(&user_actual->lista, &grupo_actual->usuarios_lista->lista);
+		atomic_inc(&grupo_actual->usuarios);
+	}
+	
+	if(unlikely(user_actual->procesos_lista == NULL))
+	{
+		user_actual->procesos_lista = p;
+	}
+	else
+		list_add_tail(&p->run_list,&user_actual->procesos_lista->run_list);
+	
+	atomic_inc(&user_actual->procesos);
 }
 
-static inline void enqueue_task_head(struct task_struct *p, prio_array_t *array)
-{
-	list_add(&p->run_list, array->queue + p->prio);
-	__set_bit(p->prio, array->bitmap);
-	array->nr_active++;
-	p->array = array;
-}
-
-/*
- * effective_prio - return the priority that is based on the static
- * priority but is modified by bonuses/penalties.
- *
- * We scale the actual sleep average [0 .... MAX_SLEEP_AVG]
- * into the -5 ... 0 ... +5 bonus/penalty range.
- *
- * We use 25% of the full 0...39 priority range so that:
- *
- * 1) nice +19 interactive tasks do not preempt nice 0 CPU hogs.
- * 2) nice -20 CPU hogs do not get preempted by nice 0 tasks.
- *
- * Both properties are important to certain workloads.
- */
-static int effective_prio(task_t *p)
-{
-	int bonus, prio;
-
-	if (rt_task(p))
-		return p->prio;
-
-	bonus = CURRENT_BONUS(p) - MAX_BONUS / 2;
-
-	prio = p->static_prio - bonus;
-	if (prio < MAX_RT_PRIO)
-		prio = MAX_RT_PRIO;
-	if (prio > MAX_PRIO-1)
-		prio = MAX_PRIO-1;
-	return prio;
-}
-
-/*
- * __activate_task - move a task to the runqueue.
- */
+/* Inserta el proceso a las estructuras del calendarizador
+ * e incrementa la variable de procesos en ejecucion. */
 static inline void __activate_task(task_t *p, runqueue_t *rq)
 {
-	enqueue_task(p, rq->active);
+	enqueue_task(p);
 	rq->nr_running++;
 }
-
 /*
- * __activate_idle_task - move idle task to the _front_ of runqueue.
+ * activate_task ---
+ * Actualiza la marca de tiempo del proceso al tiempo actual
+ * y coloca la tarea dentro de la estructura del calendarizador
  */
-static inline void __activate_idle_task(task_t *p, runqueue_t *rq)
+static void activate_task(task_t *p, runqueue_t *rq)
 {
-	enqueue_task_head(p, rq->active);
-	rq->nr_running++;
-}
-
-static int recalc_task_prio(task_t *p, unsigned long long now)
-{
-	/* Caller must always ensure 'now >= p->timestamp' */
-	unsigned long long __sleep_time = now - p->timestamp;
-	unsigned long sleep_time;
-
-	if (__sleep_time > NS_MAX_SLEEP_AVG)
-		sleep_time = NS_MAX_SLEEP_AVG;
-	else
-		sleep_time = (unsigned long)__sleep_time;
-
-	if (likely(sleep_time > 0)) {
-		/*
-		 * User tasks that sleep a long time are categorised as
-		 * idle and will get just interactive status to stay active &
-		 * prevent them suddenly becoming cpu hogs and starving
-		 * other processes.
-		 */
-		if (p->mm && p->activated != -1 &&
-			sleep_time > INTERACTIVE_SLEEP(p)) {
-				p->sleep_avg = JIFFIES_TO_NS(MAX_SLEEP_AVG -
-						DEF_TIMESLICE);
-		} else {
-			/*
-			 * The lower the sleep avg a task has the more
-			 * rapidly it will rise with sleep time.
-			 */
-			sleep_time *= (MAX_BONUS - CURRENT_BONUS(p)) ? : 1;
-
-			/*
-			 * Tasks waking from uninterruptible sleep are
-			 * limited in their sleep_avg rise as they
-			 * are likely to be waiting on I/O
-			 */
-			if (p->activated == -1 && p->mm) {
-				if (p->sleep_avg >= INTERACTIVE_SLEEP(p))
-					sleep_time = 0;
-				else if (p->sleep_avg + sleep_time >=
-						INTERACTIVE_SLEEP(p)) {
-					p->sleep_avg = INTERACTIVE_SLEEP(p);
-					sleep_time = 0;
-				}
-			}
-
-			/*
-			 * This code gives a bonus to interactive tasks.
-			 *
-			 * The boost works by updating the 'average sleep time'
-			 * value here, based on ->timestamp. The more time a
-			 * task spends sleeping, the higher the average gets -
-			 * and the higher the priority boost gets as well.
-			 */
-			p->sleep_avg += sleep_time;
-
-			if (p->sleep_avg > NS_MAX_SLEEP_AVG)
-				p->sleep_avg = NS_MAX_SLEEP_AVG;
-		}
-	}
-
-	return effective_prio(p);
-}
-
-/*
- * activate_task - move a task to the runqueue and do priority recalculation
- *
- * Update all the scheduling statistics stuff. (sleep average
- * calculation, priority modifiers, etc.)
- */
-static void activate_task(task_t *p, runqueue_t *rq, int local)
-{
-	unsigned long long now;
-
-	now = sched_clock();
-#ifdef CONFIG_SMP
-	if (!local) {
-		/* Compensate for drifting sched_clock */
-		runqueue_t *this_rq = this_rq();
-		now = (now - this_rq->timestamp_last_tick)
-			+ rq->timestamp_last_tick;
-	}
-#endif
-
-	p->prio = recalc_task_prio(p, now);
-
-	/*
-	 * This checks to make sure it's not an uninterruptible task
-	 * that is now waking up.
-	 */
-	if (!p->activated) {
-		/*
-		 * Tasks which were woken up by interrupts (ie. hw events)
-		 * are most likely of interactive nature. So we give them
-		 * the credit of extending their sleep time to the period
-		 * of time they spend on the runqueue, waiting for execution
-		 * on a CPU, first time around:
-		 */
-		if (in_interrupt())
-			p->activated = 2;
-		else {
-			/*
-			 * Normal first-time wakeups get a credit too for
-			 * on-runqueue time, but it will be weighted down:
-			 */
-			p->activated = 1;
-		}
-	}
-	p->timestamp = now;
-
+	p->timestamp = sched_clock();
 	__activate_task(p, rq);
 }
 
 /*
- * deactivate_task - remove a task from the runqueue.
+ * deactivate_task ---
+ * Decrementa la cantidad de procesos en ejecucion y quita al proceso
+ * solicitado de las estructuras del calendarizador.
  */
 static void deactivate_task(struct task_struct *p, runqueue_t *rq)
 {
 	rq->nr_running--;
-	dequeue_task(p, p->array);
-	p->array = NULL;
+	dequeue_task(p);
 }
 
 /*
  * resched_task - mark a task 'to be rescheduled now'.
- *
- * On UP this means the setting of the need_resched flag, on SMP it
- * might also involve a cross-CPU call to trigger the scheduler on
- * the target CPU.
  */
-#ifdef CONFIG_SMP
-static void resched_task(task_t *p)
-{
-	int need_resched, nrpolling;
-
-	assert_spin_locked(&task_rq(p)->lock);
-
-	/* minimise the chance of sending an interrupt to poll_idle() */
-	nrpolling = test_tsk_thread_flag(p,TIF_POLLING_NRFLAG);
-	need_resched = test_and_set_tsk_thread_flag(p,TIF_NEED_RESCHED);
-	nrpolling |= test_tsk_thread_flag(p,TIF_POLLING_NRFLAG);
-
-	if (!need_resched && !nrpolling && (task_cpu(p) != smp_processor_id()))
-		smp_send_reschedule(task_cpu(p));
-}
-#else
 static inline void resched_task(task_t *p)
 {
 	set_tsk_need_resched(p);
 }
-#endif
 
 /**
  * task_curr - is this task currently executing on a CPU?
@@ -836,257 +889,6 @@ inline int task_curr(const task_t *p)
 	return cpu_curr(task_cpu(p)) == p;
 }
 
-#ifdef CONFIG_SMP
-typedef struct {
-	struct list_head list;
-
-	task_t *task;
-	int dest_cpu;
-
-	struct completion done;
-} migration_req_t;
-
-/*
- * The task's runqueue lock must be held.
- * Returns true if you have to wait for migration thread.
- */
-static int migrate_task(task_t *p, int dest_cpu, migration_req_t *req)
-{
-	runqueue_t *rq = task_rq(p);
-
-	/*
-	 * If the task is not on a runqueue (and not running), then
-	 * it is sufficient to simply update the task's cpu field.
-	 */
-	if (!p->array && !task_running(rq, p)) {
-		set_task_cpu(p, dest_cpu);
-		return 0;
-	}
-
-	init_completion(&req->done);
-	req->task = p;
-	req->dest_cpu = dest_cpu;
-	list_add(&req->list, &rq->migration_queue);
-	return 1;
-}
-
-/*
- * wait_task_inactive - wait for a thread to unschedule.
- *
- * The caller must ensure that the task *will* unschedule sometime soon,
- * else this function might spin for a *long* time. This function can't
- * be called with interrupts off, or it may introduce deadlock with
- * smp_call_function() if an IPI is sent by the same process we are
- * waiting to become inactive.
- */
-void wait_task_inactive(task_t *p)
-{
-	unsigned long flags;
-	runqueue_t *rq;
-	int preempted;
-
-repeat:
-	rq = task_rq_lock(p, &flags);
-	/* Must be off runqueue entirely, not preempted. */
-	if (unlikely(p->array || task_running(rq, p))) {
-		/* If it's preempted, we yield.  It could be a while. */
-		preempted = !task_running(rq, p);
-		task_rq_unlock(rq, &flags);
-		cpu_relax();
-		if (preempted)
-			yield();
-		goto repeat;
-	}
-	task_rq_unlock(rq, &flags);
-}
-
-/***
- * kick_process - kick a running thread to enter/exit the kernel
- * @p: the to-be-kicked thread
- *
- * Cause a process which is running on another CPU to enter
- * kernel-mode, without any delay. (to get signals handled.)
- *
- * NOTE: this function doesnt have to take the runqueue lock,
- * because all it wants to ensure is that the remote task enters
- * the kernel. If the IPI races and the task has been migrated
- * to another CPU then no harm is done and the purpose has been
- * achieved as well.
- */
-void kick_process(task_t *p)
-{
-	int cpu;
-
-	preempt_disable();
-	cpu = task_cpu(p);
-	if ((cpu != smp_processor_id()) && task_curr(p))
-		smp_send_reschedule(cpu);
-	preempt_enable();
-}
-
-/*
- * Return a low guess at the load of a migration-source cpu.
- *
- * We want to under-estimate the load of migration sources, to
- * balance conservatively.
- */
-static inline unsigned long source_load(int cpu, int type)
-{
-	runqueue_t *rq = cpu_rq(cpu);
-	unsigned long load_now = rq->nr_running * SCHED_LOAD_SCALE;
-	if (type == 0)
-		return load_now;
-
-	return min(rq->cpu_load[type-1], load_now);
-}
-
-/*
- * Return a high guess at the load of a migration-target cpu
- */
-static inline unsigned long target_load(int cpu, int type)
-{
-	runqueue_t *rq = cpu_rq(cpu);
-	unsigned long load_now = rq->nr_running * SCHED_LOAD_SCALE;
-	if (type == 0)
-		return load_now;
-
-	return max(rq->cpu_load[type-1], load_now);
-}
-
-/*
- * find_idlest_group finds and returns the least busy CPU group within the
- * domain.
- */
-static struct sched_group *
-find_idlest_group(struct sched_domain *sd, struct task_struct *p, int this_cpu)
-{
-	struct sched_group *idlest = NULL, *this = NULL, *group = sd->groups;
-	unsigned long min_load = ULONG_MAX, this_load = 0;
-	int load_idx = sd->forkexec_idx;
-	int imbalance = 100 + (sd->imbalance_pct-100)/2;
-
-	do {
-		unsigned long load, avg_load;
-		int local_group;
-		int i;
-
-		/* Skip over this group if it has no CPUs allowed */
-		if (!cpus_intersects(group->cpumask, p->cpus_allowed))
-			goto nextgroup;
-
-		local_group = cpu_isset(this_cpu, group->cpumask);
-
-		/* Tally up the load of all CPUs in the group */
-		avg_load = 0;
-
-		for_each_cpu_mask(i, group->cpumask) {
-			/* Bias balancing toward cpus of our domain */
-			if (local_group)
-				load = source_load(i, load_idx);
-			else
-				load = target_load(i, load_idx);
-
-			avg_load += load;
-		}
-
-		/* Adjust by relative CPU power of the group */
-		avg_load = (avg_load * SCHED_LOAD_SCALE) / group->cpu_power;
-
-		if (local_group) {
-			this_load = avg_load;
-			this = group;
-		} else if (avg_load < min_load) {
-			min_load = avg_load;
-			idlest = group;
-		}
-nextgroup:
-		group = group->next;
-	} while (group != sd->groups);
-
-	if (!idlest || 100*this_load < imbalance*min_load)
-		return NULL;
-	return idlest;
-}
-
-/*
- * find_idlest_queue - find the idlest runqueue among the cpus in group.
- */
-static int
-find_idlest_cpu(struct sched_group *group, struct task_struct *p, int this_cpu)
-{
-	cpumask_t tmp;
-	unsigned long load, min_load = ULONG_MAX;
-	int idlest = -1;
-	int i;
-
-	/* Traverse only the allowed CPUs */
-	cpus_and(tmp, group->cpumask, p->cpus_allowed);
-
-	for_each_cpu_mask(i, tmp) {
-		load = source_load(i, 0);
-
-		if (load < min_load || (load == min_load && i == this_cpu)) {
-			min_load = load;
-			idlest = i;
-		}
-	}
-
-	return idlest;
-}
-
-/*
- * sched_balance_self: balance the current task (running on cpu) in domains
- * that have the 'flag' flag set. In practice, this is SD_BALANCE_FORK and
- * SD_BALANCE_EXEC.
- *
- * Balance, ie. select the least loaded group.
- *
- * Returns the target CPU number, or the same CPU if no balancing is needed.
- *
- * preempt must be disabled.
- */
-static int sched_balance_self(int cpu, int flag)
-{
-	struct task_struct *t = current;
-	struct sched_domain *tmp, *sd = NULL;
-
-	for_each_domain(cpu, tmp)
-		if (tmp->flags & flag)
-			sd = tmp;
-
-	while (sd) {
-		cpumask_t span;
-		struct sched_group *group;
-		int new_cpu;
-		int weight;
-
-		span = sd->span;
-		group = find_idlest_group(sd, t, cpu);
-		if (!group)
-			goto nextlevel;
-
-		new_cpu = find_idlest_cpu(group, t, cpu);
-		if (new_cpu == -1 || new_cpu == cpu)
-			goto nextlevel;
-
-		/* Now try balancing at a lower domain level */
-		cpu = new_cpu;
-nextlevel:
-		sd = NULL;
-		weight = cpus_weight(span);
-		for_each_domain(cpu, tmp) {
-			if (weight <= cpus_weight(tmp->span))
-				break;
-			if (tmp->flags & flag)
-				sd = tmp;
-		}
-		/* while loop will break here if sd == NULL */
-	}
-
-	return cpu;
-}
-
-#endif /* CONFIG_SMP */
 
 /*
  * wake_idle() will wake a task on an idle cpu if task->cpu is
@@ -1146,134 +948,38 @@ static int try_to_wake_up(task_t *p, unsigned int state, int sync)
 	unsigned long flags;
 	long old_state;
 	runqueue_t *rq;
-#ifdef CONFIG_SMP
-	unsigned long load, this_load;
-	struct sched_domain *sd, *this_sd = NULL;
-	int new_cpu;
-#endif
 
 	rq = task_rq_lock(p, &flags);
 	old_state = p->state;
+
+	/* Si la tarea ya estaba, tranquilo */
 	if (!(old_state & state))
 		goto out;
-
-	if (p->array)
-		goto out_running;
 
 	cpu = task_cpu(p);
 	this_cpu = smp_processor_id();
 
-#ifdef CONFIG_SMP
-	if (unlikely(task_running(rq, p)))
-		goto out_activate;
-
-	new_cpu = cpu;
-
-	schedstat_inc(rq, ttwu_cnt);
-	if (cpu == this_cpu) {
-		schedstat_inc(rq, ttwu_local);
-		goto out_set_cpu;
-	}
-
-	for_each_domain(this_cpu, sd) {
-		if (cpu_isset(cpu, sd->span)) {
-			schedstat_inc(sd, ttwu_wake_remote);
-			this_sd = sd;
-			break;
-		}
-	}
-
-	if (unlikely(!cpu_isset(this_cpu, p->cpus_allowed)))
-		goto out_set_cpu;
-
-	/*
-	 * Check for affine wakeup and passive balancing possibilities.
-	 */
-	if (this_sd) {
-		int idx = this_sd->wake_idx;
-		unsigned int imbalance;
-
-		imbalance = 100 + (this_sd->imbalance_pct - 100) / 2;
-
-		load = source_load(cpu, idx);
-		this_load = target_load(this_cpu, idx);
-
-		new_cpu = this_cpu; /* Wake to this CPU if we can */
-
-		if (this_sd->flags & SD_WAKE_AFFINE) {
-			unsigned long tl = this_load;
-			/*
-			 * If sync wakeup then subtract the (maximum possible)
-			 * effect of the currently running task from the load
-			 * of the current CPU:
-			 */
-			if (sync)
-				tl -= SCHED_LOAD_SCALE;
-
-			if ((tl <= load &&
-				tl + target_load(cpu, idx) <= SCHED_LOAD_SCALE) ||
-				100*(tl + SCHED_LOAD_SCALE) <= imbalance*load) {
-				/*
-				 * This domain has SD_WAKE_AFFINE and
-				 * p is cache cold in this domain, and
-				 * there is no bad imbalance.
-				 */
-				schedstat_inc(this_sd, ttwu_move_affine);
-				goto out_set_cpu;
-			}
-		}
-
-		/*
-		 * Start passive balancing when half the imbalance_pct
-		 * limit is reached.
-		 */
-		if (this_sd->flags & SD_WAKE_BALANCE) {
-			if (imbalance*this_load <= 100*load) {
-				schedstat_inc(this_sd, ttwu_move_balance);
-				goto out_set_cpu;
-			}
-		}
-	}
-
-	new_cpu = cpu; /* Could not wake to this_cpu. Wake to cpu instead */
-out_set_cpu:
-	new_cpu = wake_idle(new_cpu, p);
-	if (new_cpu != cpu) {
-		set_task_cpu(p, new_cpu);
-		task_rq_unlock(rq, &flags);
-		/* might preempt at this point */
-		rq = task_rq_lock(p, &flags);
-		old_state = p->state;
-		if (!(old_state & state))
-			goto out;
-		if (p->array)
-			goto out_running;
-
-		this_cpu = smp_processor_id();
-		cpu = task_cpu(p);
-	}
-
-out_activate:
-#endif /* CONFIG_SMP */
-	if (old_state == TASK_UNINTERRUPTIBLE) {
+	if (old_state == TASK_UNINTERRUPTIBLE) 
+	{
 		rq->nr_uninterruptible--;
-		/*
-		 * Tasks on involuntary sleep don't earn
-		 * sleep_avg beyond just interactive state.
-		 */
 		p->activated = -1;
 	}
-
-	/*
-	 * Tasks that have marked their sleep as noninteractive get
-	 * woken up without updating their sleep average. (i.e. their
-	 * sleep is handled in a priority-neutral manner, no priority
-	 * boost and no penalty.)
-	 */
-	if (old_state & TASK_NONINTERACTIVE)
-		__activate_task(p, rq);
-	else
-		activate_task(p, rq, cpu == this_cpu);
+	
+	p->state = TASK_RUNNING;
+	if(list_empty(&(p->run_list)) && p->usuario->procesos_lista != p)
+	{
+		/* Adicionar a la tarea una fraccion mas de tiempo mientras que
+		   posea menos de dos fracciones, esto se hace para mejorar
+		   la justicia con procesos que duermen */
+		if(unlikely(p->time_slice >= (2 * DEF_TIMESLICE)))
+			p->time_slice = (2 * DEF_TIMESLICE);
+		else
+			p->time_slice += DEF_TIMESLICE;
+		if (old_state & TASK_NONINTERACTIVE)
+			__activate_task(p, rq);
+		else
+			activate_task(p, rq);
+	}
 	/*
 	 * Sync wakeups (i.e. those types of wakeups where the waker
 	 * has indicated that it will leave the CPU in short order)
@@ -1283,13 +989,10 @@ out_activate:
 	 * to be considered on this CPU.)
 	 */
 	if (!sync || cpu != this_cpu) {
-		if (TASK_PREEMPTS_CURR(p, rq))
-			resched_task(rq->curr);
+		resched_task(rq->curr);
 	}
 	success = 1;
-
-out_running:
-	p->state = TASK_RUNNING;
+	
 out:
 	task_rq_unlock(rq, &flags);
 
@@ -1309,62 +1012,43 @@ int fastcall wake_up_state(task_t *p, unsigned int state)
 	return try_to_wake_up(p, state, 0);
 }
 
+
 /*
- * Perform scheduler related setup for a newly forked process p.
- * p is forked by current.
+ * Realiza las inicializaciones referentes al scheduler en un proceso (current)
  */
 void fastcall sched_fork(task_t *p, int clone_flags)
 {
 	int cpu = get_cpu();
-
-#ifdef CONFIG_SMP
-	cpu = sched_balance_self(cpu, SD_BALANCE_FORK);
-#endif
 	set_task_cpu(p, cpu);
 
-	/*
-	 * We mark the process as running here, but have not actually
-	 * inserted it onto the runqueue yet. This guarantees that
-	 * nobody will actually run it, and a signal or other external
-	 * event cannot wake it up and insert it on the runqueue either.
-	 */
-	p->state = TASK_RUNNING;
+	/* Inicializacion del nodo para la lista de procesos del usuario */
 	INIT_LIST_HEAD(&p->run_list);
-	p->array = NULL;
+	p->static_prio = 0;
+
+	/* Asignacion del primer timeslice */
+	p->first_time_slice = 1;
+	p->time_slice = DEF_TIMESLICE;
 #ifdef CONFIG_SCHEDSTATS
 	memset(&p->sched_info, 0, sizeof(p->sched_info));
-#endif
-#if defined(CONFIG_SMP) && defined(__ARCH_WANT_UNLOCKED_CTXSW)
-	p->oncpu = 0;
+	p->sched_info.run_delay = 1;
 #endif
 #ifdef CONFIG_PREEMPT
 	/* Want to start with kernel preemption disabled. */
 	p->thread_info->preempt_count = 1;
 #endif
 	/*
-	 * Share the timeslice between parent and child, thus the
-	 * total amount of pending timeslices in the system doesn't change,
-	 * resulting in more scheduling fairness.
+	 * Asignacion de grupo y usuario correspondiente al proceso
 	 */
+	p->grupo = init_grupo(p->gid);
+	p->usuario = init_usuario(p->uid);
+	/* Marcar en ejecucion */
+	p->state = TASK_RUNNING;
+
 	local_irq_disable();
-	p->time_slice = (current->time_slice + 1) >> 1;
-	/*
-	 * The remainder of the first timeslice might be recovered by
-	 * the parent if the child exits early enough.
-	 */
-	p->first_time_slice = 1;
-	current->time_slice >>= 1;
+	/* Timestamp es long long y requiere dos instrucciones para la asignacion */
 	p->timestamp = sched_clock();
-	if (unlikely(!current->time_slice)) {
-		/*
-		 * This case is rare, it happens when the parent has only
-		 * a single jiffy left from its timeslice. Taking the
-		 * runqueue lock is not a problem.
-		 */
-		current->time_slice = 1;
-		scheduler_tick();
-	}
 	local_irq_enable();
+
 	put_cpu();
 }
 
@@ -1378,106 +1062,37 @@ void fastcall sched_fork(task_t *p, int clone_flags)
 void fastcall wake_up_new_task(task_t *p, unsigned long clone_flags)
 {
 	unsigned long flags;
-	int this_cpu, cpu;
-	runqueue_t *rq, *this_rq;
+	runqueue_t *rq;
 
 	rq = task_rq_lock(p, &flags);
 	BUG_ON(p->state != TASK_RUNNING);
-	this_cpu = smp_processor_id();
-	cpu = task_cpu(p);
 
-	/*
-	 * We decrease the sleep average of forking parents
-	 * and children as well, to keep max-interactive tasks
-	 * from forking tasks that are max-interactive. The parent
-	 * (current) is done further down, under its lock.
-	 */
-	p->sleep_avg = JIFFIES_TO_NS(CURRENT_BONUS(p) *
-		CHILD_PENALTY / 100 * MAX_SLEEP_AVG / MAX_BONUS);
+	p->sleep_avg = 0;
 
-	p->prio = effective_prio(p);
+	__activate_task(p, rq);
 
-	if (likely(cpu == this_cpu)) {
-		if (!(clone_flags & CLONE_VM)) {
-			/*
-			 * The VM isn't cloned, so we're in a good position to
-			 * do child-runs-first in anticipation of an exec. This
-			 * usually avoids a lot of COW overhead.
-			 */
-			if (unlikely(!current->array))
-				__activate_task(p, rq);
-			else {
-				p->prio = current->prio;
-				list_add_tail(&p->run_list, &current->run_list);
-				p->array = current->array;
-				p->array->nr_active++;
-				rq->nr_running++;
-			}
-			set_need_resched();
-		} else
-			/* Run child last */
-			__activate_task(p, rq);
-		/*
-		 * We skip the following code due to cpu == this_cpu
-	 	 *
-		 *   task_rq_unlock(rq, &flags);
-		 *   this_rq = task_rq_lock(current, &flags);
-		 */
-		this_rq = rq;
-	} else {
-		this_rq = cpu_rq(this_cpu);
-
-		/*
-		 * Not the local CPU - must adjust timestamp. This should
-		 * get optimised away in the !CONFIG_SMP case.
-		 */
-		p->timestamp = (p->timestamp - this_rq->timestamp_last_tick)
-					+ rq->timestamp_last_tick;
-		__activate_task(p, rq);
-		if (TASK_PREEMPTS_CURR(p, rq))
-			resched_task(rq->curr);
-
-		/*
-		 * Parent and child are on different CPUs, now get the
-		 * parent runqueue to update the parent's ->sleep_avg:
-		 */
-		task_rq_unlock(rq, &flags);
-		this_rq = task_rq_lock(current, &flags);
-	}
-	current->sleep_avg = JIFFIES_TO_NS(CURRENT_BONUS(current) *
-		PARENT_PENALTY / 100 * MAX_SLEEP_AVG / MAX_BONUS);
-	task_rq_unlock(this_rq, &flags);
+	task_rq_unlock(rq, &flags);
 }
 
 /*
- * Potentially available exiting-child timeslices are
- * retrieved here - this way the parent does not get
- * penalized for creating too many threads.
- *
- * (this cannot be used to 'generate' timeslices
- * artificially, because any timeslice recovered here
- * was given away by the parent in the first place.)
+ * Limpieza de referencias y posible memoria utilizada
+ * por un proceso que acaba de terminar.
+ * Basicamente decrementar las referencias en el grupo
+ * y usuario, y liberar memoria si corresponde.
  */
 void fastcall sched_exit(task_t *p)
 {
-	unsigned long flags;
-	runqueue_t *rq;
-
-	/*
-	 * If the child was a (relative-) CPU hog then decrease
-	 * the sleep_avg of the parent as well.
-	 */
-	rq = task_rq_lock(p->parent, &flags);
-	if (p->first_time_slice) {
-		p->parent->time_slice += p->time_slice;
-		if (unlikely(p->parent->time_slice > task_timeslice(p)))
-			p->parent->time_slice = task_timeslice(p);
-	}
-	if (p->sleep_avg < p->parent->sleep_avg)
-		p->parent->sleep_avg = p->parent->sleep_avg /
-		(EXIT_WEIGHT + 1) * EXIT_WEIGHT + p->sleep_avg /
-		(EXIT_WEIGHT + 1);
-	task_rq_unlock(rq, &flags);
+#ifdef CONFIG_SCHEDSTAT
+	p->usuario->sched_info.run_delay -= p->sched_info.run_delay;
+	p->usuario->sched_info.cpu_time -= p->sched_info.cpu_time;
+	p->grupo->sched_info.run_delay -= p->sched_info.run_delay;
+	p->grupo->sched_info.cpu_time -= p->sched_info.cpu_time;
+	if(p->grupo->sched_info.run_delay <= 0) p->grupo->sched_info.run_delay =1;
+	if(p->usuario->sched_info.run_delay <= 0) p->usuario->sched_info.run_delay =1;
+#endif
+	delete_usuario(p->usuario);
+	delete_grupo(p->grupo);
+	
 }
 
 /**
@@ -1641,751 +1256,6 @@ unsigned long nr_iowait(void)
 	return sum;
 }
 
-#ifdef CONFIG_SMP
-
-/*
- * double_rq_lock - safely lock two runqueues
- *
- * Note this does not disable interrupts like task_rq_lock,
- * you need to do so manually before calling.
- */
-static void double_rq_lock(runqueue_t *rq1, runqueue_t *rq2)
-	__acquires(rq1->lock)
-	__acquires(rq2->lock)
-{
-	if (rq1 == rq2) {
-		spin_lock(&rq1->lock);
-		__acquire(rq2->lock);	/* Fake it out ;) */
-	} else {
-		if (rq1 < rq2) {
-			spin_lock(&rq1->lock);
-			spin_lock(&rq2->lock);
-		} else {
-			spin_lock(&rq2->lock);
-			spin_lock(&rq1->lock);
-		}
-	}
-}
-
-/*
- * double_rq_unlock - safely unlock two runqueues
- *
- * Note this does not restore interrupts like task_rq_unlock,
- * you need to do so manually after calling.
- */
-static void double_rq_unlock(runqueue_t *rq1, runqueue_t *rq2)
-	__releases(rq1->lock)
-	__releases(rq2->lock)
-{
-	spin_unlock(&rq1->lock);
-	if (rq1 != rq2)
-		spin_unlock(&rq2->lock);
-	else
-		__release(rq2->lock);
-}
-
-/*
- * double_lock_balance - lock the busiest runqueue, this_rq is locked already.
- */
-static void double_lock_balance(runqueue_t *this_rq, runqueue_t *busiest)
-	__releases(this_rq->lock)
-	__acquires(busiest->lock)
-	__acquires(this_rq->lock)
-{
-	if (unlikely(!spin_trylock(&busiest->lock))) {
-		if (busiest < this_rq) {
-			spin_unlock(&this_rq->lock);
-			spin_lock(&busiest->lock);
-			spin_lock(&this_rq->lock);
-		} else
-			spin_lock(&busiest->lock);
-	}
-}
-
-/*
- * If dest_cpu is allowed for this process, migrate the task to it.
- * This is accomplished by forcing the cpu_allowed mask to only
- * allow dest_cpu, which will force the cpu onto dest_cpu.  Then
- * the cpu_allowed mask is restored.
- */
-static void sched_migrate_task(task_t *p, int dest_cpu)
-{
-	migration_req_t req;
-	runqueue_t *rq;
-	unsigned long flags;
-
-	rq = task_rq_lock(p, &flags);
-	if (!cpu_isset(dest_cpu, p->cpus_allowed)
-	    || unlikely(cpu_is_offline(dest_cpu)))
-		goto out;
-
-	/* force the process onto the specified CPU */
-	if (migrate_task(p, dest_cpu, &req)) {
-		/* Need to wait for migration thread (might exit: take ref). */
-		struct task_struct *mt = rq->migration_thread;
-		get_task_struct(mt);
-		task_rq_unlock(rq, &flags);
-		wake_up_process(mt);
-		put_task_struct(mt);
-		wait_for_completion(&req.done);
-		return;
-	}
-out:
-	task_rq_unlock(rq, &flags);
-}
-
-/*
- * sched_exec - execve() is a valuable balancing opportunity, because at
- * this point the task has the smallest effective memory and cache footprint.
- */
-void sched_exec(void)
-{
-	int new_cpu, this_cpu = get_cpu();
-	new_cpu = sched_balance_self(this_cpu, SD_BALANCE_EXEC);
-	put_cpu();
-	if (new_cpu != this_cpu)
-		sched_migrate_task(current, new_cpu);
-}
-
-/*
- * pull_task - move a task from a remote runqueue to the local runqueue.
- * Both runqueues must be locked.
- */
-static inline
-void pull_task(runqueue_t *src_rq, prio_array_t *src_array, task_t *p,
-	       runqueue_t *this_rq, prio_array_t *this_array, int this_cpu)
-{
-	dequeue_task(p, src_array);
-	src_rq->nr_running--;
-	set_task_cpu(p, this_cpu);
-	this_rq->nr_running++;
-	enqueue_task(p, this_array);
-	p->timestamp = (p->timestamp - src_rq->timestamp_last_tick)
-				+ this_rq->timestamp_last_tick;
-	/*
-	 * Note that idle threads have a prio of MAX_PRIO, for this test
-	 * to be always true for them.
-	 */
-	if (TASK_PREEMPTS_CURR(p, this_rq))
-		resched_task(this_rq->curr);
-}
-
-/*
- * can_migrate_task - may task p from runqueue rq be migrated to this_cpu?
- */
-static inline
-int can_migrate_task(task_t *p, runqueue_t *rq, int this_cpu,
-		     struct sched_domain *sd, enum idle_type idle,
-		     int *all_pinned)
-{
-	/*
-	 * We do not migrate tasks that are:
-	 * 1) running (obviously), or
-	 * 2) cannot be migrated to this CPU due to cpus_allowed, or
-	 * 3) are cache-hot on their current CPU.
-	 */
-	if (!cpu_isset(this_cpu, p->cpus_allowed))
-		return 0;
-	*all_pinned = 0;
-
-	if (task_running(rq, p))
-		return 0;
-
-	/*
-	 * Aggressive migration if:
-	 * 1) task is cache cold, or
-	 * 2) too many balance attempts have failed.
-	 */
-
-	if (sd->nr_balance_failed > sd->cache_nice_tries)
-		return 1;
-
-	if (task_hot(p, rq->timestamp_last_tick, sd))
-		return 0;
-	return 1;
-}
-
-/*
- * move_tasks tries to move up to max_nr_move tasks from busiest to this_rq,
- * as part of a balancing operation within "domain". Returns the number of
- * tasks moved.
- *
- * Called with both runqueues locked.
- */
-static int move_tasks(runqueue_t *this_rq, int this_cpu, runqueue_t *busiest,
-		      unsigned long max_nr_move, struct sched_domain *sd,
-		      enum idle_type idle, int *all_pinned)
-{
-	prio_array_t *array, *dst_array;
-	struct list_head *head, *curr;
-	int idx, pulled = 0, pinned = 0;
-	task_t *tmp;
-
-	if (max_nr_move == 0)
-		goto out;
-
-	pinned = 1;
-
-	/*
-	 * We first consider expired tasks. Those will likely not be
-	 * executed in the near future, and they are most likely to
-	 * be cache-cold, thus switching CPUs has the least effect
-	 * on them.
-	 */
-	if (busiest->expired->nr_active) {
-		array = busiest->expired;
-		dst_array = this_rq->expired;
-	} else {
-		array = busiest->active;
-		dst_array = this_rq->active;
-	}
-
-new_array:
-	/* Start searching at priority 0: */
-	idx = 0;
-skip_bitmap:
-	if (!idx)
-		idx = sched_find_first_bit(array->bitmap);
-	else
-		idx = find_next_bit(array->bitmap, MAX_PRIO, idx);
-	if (idx >= MAX_PRIO) {
-		if (array == busiest->expired && busiest->active->nr_active) {
-			array = busiest->active;
-			dst_array = this_rq->active;
-			goto new_array;
-		}
-		goto out;
-	}
-
-	head = array->queue + idx;
-	curr = head->prev;
-skip_queue:
-	tmp = list_entry(curr, task_t, run_list);
-
-	curr = curr->prev;
-
-	if (!can_migrate_task(tmp, busiest, this_cpu, sd, idle, &pinned)) {
-		if (curr != head)
-			goto skip_queue;
-		idx++;
-		goto skip_bitmap;
-	}
-
-#ifdef CONFIG_SCHEDSTATS
-	if (task_hot(tmp, busiest->timestamp_last_tick, sd))
-		schedstat_inc(sd, lb_hot_gained[idle]);
-#endif
-
-	pull_task(busiest, array, tmp, this_rq, dst_array, this_cpu);
-	pulled++;
-
-	/* We only want to steal up to the prescribed number of tasks. */
-	if (pulled < max_nr_move) {
-		if (curr != head)
-			goto skip_queue;
-		idx++;
-		goto skip_bitmap;
-	}
-out:
-	/*
-	 * Right now, this is the only place pull_task() is called,
-	 * so we can safely collect pull_task() stats here rather than
-	 * inside pull_task().
-	 */
-	schedstat_add(sd, lb_gained[idle], pulled);
-
-	if (all_pinned)
-		*all_pinned = pinned;
-	return pulled;
-}
-
-/*
- * find_busiest_group finds and returns the busiest CPU group within the
- * domain. It calculates and returns the number of tasks which should be
- * moved to restore balance via the imbalance parameter.
- */
-static struct sched_group *
-find_busiest_group(struct sched_domain *sd, int this_cpu,
-		   unsigned long *imbalance, enum idle_type idle, int *sd_idle)
-{
-	struct sched_group *busiest = NULL, *this = NULL, *group = sd->groups;
-	unsigned long max_load, avg_load, total_load, this_load, total_pwr;
-	unsigned long max_pull;
-	int load_idx;
-
-	max_load = this_load = total_load = total_pwr = 0;
-	if (idle == NOT_IDLE)
-		load_idx = sd->busy_idx;
-	else if (idle == NEWLY_IDLE)
-		load_idx = sd->newidle_idx;
-	else
-		load_idx = sd->idle_idx;
-
-	do {
-		unsigned long load;
-		int local_group;
-		int i;
-
-		local_group = cpu_isset(this_cpu, group->cpumask);
-
-		/* Tally up the load of all CPUs in the group */
-		avg_load = 0;
-
-		for_each_cpu_mask(i, group->cpumask) {
-			if (*sd_idle && !idle_cpu(i))
-				*sd_idle = 0;
-
-			/* Bias balancing toward cpus of our domain */
-			if (local_group)
-				load = target_load(i, load_idx);
-			else
-				load = source_load(i, load_idx);
-
-			avg_load += load;
-		}
-
-		total_load += avg_load;
-		total_pwr += group->cpu_power;
-
-		/* Adjust by relative CPU power of the group */
-		avg_load = (avg_load * SCHED_LOAD_SCALE) / group->cpu_power;
-
-		if (local_group) {
-			this_load = avg_load;
-			this = group;
-		} else if (avg_load > max_load) {
-			max_load = avg_load;
-			busiest = group;
-		}
-		group = group->next;
-	} while (group != sd->groups);
-
-	if (!busiest || this_load >= max_load || max_load <= SCHED_LOAD_SCALE)
-		goto out_balanced;
-
-	avg_load = (SCHED_LOAD_SCALE * total_load) / total_pwr;
-
-	if (this_load >= avg_load ||
-			100*max_load <= sd->imbalance_pct*this_load)
-		goto out_balanced;
-
-	/*
-	 * We're trying to get all the cpus to the average_load, so we don't
-	 * want to push ourselves above the average load, nor do we wish to
-	 * reduce the max loaded cpu below the average load, as either of these
-	 * actions would just result in more rebalancing later, and ping-pong
-	 * tasks around. Thus we look for the minimum possible imbalance.
-	 * Negative imbalances (*we* are more loaded than anyone else) will
-	 * be counted as no imbalance for these purposes -- we can't fix that
-	 * by pulling tasks to us.  Be careful of negative numbers as they'll
-	 * appear as very large values with unsigned longs.
-	 */
-
-	/* Don't want to pull so many tasks that a group would go idle */
-	max_pull = min(max_load - avg_load, max_load - SCHED_LOAD_SCALE);
-
-	/* How much load to actually move to equalise the imbalance */
-	*imbalance = min(max_pull * busiest->cpu_power,
-				(avg_load - this_load) * this->cpu_power)
-			/ SCHED_LOAD_SCALE;
-
-	if (*imbalance < SCHED_LOAD_SCALE) {
-		unsigned long pwr_now = 0, pwr_move = 0;
-		unsigned long tmp;
-
-		if (max_load - this_load >= SCHED_LOAD_SCALE*2) {
-			*imbalance = 1;
-			return busiest;
-		}
-
-		/*
-		 * OK, we don't have enough imbalance to justify moving tasks,
-		 * however we may be able to increase total CPU power used by
-		 * moving them.
-		 */
-
-		pwr_now += busiest->cpu_power*min(SCHED_LOAD_SCALE, max_load);
-		pwr_now += this->cpu_power*min(SCHED_LOAD_SCALE, this_load);
-		pwr_now /= SCHED_LOAD_SCALE;
-
-		/* Amount of load we'd subtract */
-		tmp = SCHED_LOAD_SCALE*SCHED_LOAD_SCALE/busiest->cpu_power;
-		if (max_load > tmp)
-			pwr_move += busiest->cpu_power*min(SCHED_LOAD_SCALE,
-							max_load - tmp);
-
-		/* Amount of load we'd add */
-		if (max_load*busiest->cpu_power <
-				SCHED_LOAD_SCALE*SCHED_LOAD_SCALE)
-			tmp = max_load*busiest->cpu_power/this->cpu_power;
-		else
-			tmp = SCHED_LOAD_SCALE*SCHED_LOAD_SCALE/this->cpu_power;
-		pwr_move += this->cpu_power*min(SCHED_LOAD_SCALE, this_load + tmp);
-		pwr_move /= SCHED_LOAD_SCALE;
-
-		/* Move if we gain throughput */
-		if (pwr_move <= pwr_now)
-			goto out_balanced;
-
-		*imbalance = 1;
-		return busiest;
-	}
-
-	/* Get rid of the scaling factor, rounding down as we divide */
-	*imbalance = *imbalance / SCHED_LOAD_SCALE;
-	return busiest;
-
-out_balanced:
-
-	*imbalance = 0;
-	return NULL;
-}
-
-/*
- * find_busiest_queue - find the busiest runqueue among the cpus in group.
- */
-static runqueue_t *find_busiest_queue(struct sched_group *group)
-{
-	unsigned long load, max_load = 0;
-	runqueue_t *busiest = NULL;
-	int i;
-
-	for_each_cpu_mask(i, group->cpumask) {
-		load = source_load(i, 0);
-
-		if (load > max_load) {
-			max_load = load;
-			busiest = cpu_rq(i);
-		}
-	}
-
-	return busiest;
-}
-
-/*
- * Max backoff if we encounter pinned tasks. Pretty arbitrary value, but
- * so long as it is large enough.
- */
-#define MAX_PINNED_INTERVAL	512
-
-/*
- * Check this_cpu to ensure it is balanced within domain. Attempt to move
- * tasks if there is an imbalance.
- *
- * Called with this_rq unlocked.
- */
-static int load_balance(int this_cpu, runqueue_t *this_rq,
-			struct sched_domain *sd, enum idle_type idle)
-{
-	struct sched_group *group;
-	runqueue_t *busiest;
-	unsigned long imbalance;
-	int nr_moved, all_pinned = 0;
-	int active_balance = 0;
-	int sd_idle = 0;
-
-	if (idle != NOT_IDLE && sd->flags & SD_SHARE_CPUPOWER)
-		sd_idle = 1;
-
-	schedstat_inc(sd, lb_cnt[idle]);
-
-	group = find_busiest_group(sd, this_cpu, &imbalance, idle, &sd_idle);
-	if (!group) {
-		schedstat_inc(sd, lb_nobusyg[idle]);
-		goto out_balanced;
-	}
-
-	busiest = find_busiest_queue(group);
-	if (!busiest) {
-		schedstat_inc(sd, lb_nobusyq[idle]);
-		goto out_balanced;
-	}
-
-	BUG_ON(busiest == this_rq);
-
-	schedstat_add(sd, lb_imbalance[idle], imbalance);
-
-	nr_moved = 0;
-	if (busiest->nr_running > 1) {
-		/*
-		 * Attempt to move tasks. If find_busiest_group has found
-		 * an imbalance but busiest->nr_running <= 1, the group is
-		 * still unbalanced. nr_moved simply stays zero, so it is
-		 * correctly treated as an imbalance.
-		 */
-		double_rq_lock(this_rq, busiest);
-		nr_moved = move_tasks(this_rq, this_cpu, busiest,
-					imbalance, sd, idle, &all_pinned);
-		double_rq_unlock(this_rq, busiest);
-
-		/* All tasks on this runqueue were pinned by CPU affinity */
-		if (unlikely(all_pinned))
-			goto out_balanced;
-	}
-
-	if (!nr_moved) {
-		schedstat_inc(sd, lb_failed[idle]);
-		sd->nr_balance_failed++;
-
-		if (unlikely(sd->nr_balance_failed > sd->cache_nice_tries+2)) {
-
-			spin_lock(&busiest->lock);
-
-			/* don't kick the migration_thread, if the curr
-			 * task on busiest cpu can't be moved to this_cpu
-			 */
-			if (!cpu_isset(this_cpu, busiest->curr->cpus_allowed)) {
-				spin_unlock(&busiest->lock);
-				all_pinned = 1;
-				goto out_one_pinned;
-			}
-
-			if (!busiest->active_balance) {
-				busiest->active_balance = 1;
-				busiest->push_cpu = this_cpu;
-				active_balance = 1;
-			}
-			spin_unlock(&busiest->lock);
-			if (active_balance)
-				wake_up_process(busiest->migration_thread);
-
-			/*
-			 * We've kicked active balancing, reset the failure
-			 * counter.
-			 */
-			sd->nr_balance_failed = sd->cache_nice_tries+1;
-		}
-	} else
-		sd->nr_balance_failed = 0;
-
-	if (likely(!active_balance)) {
-		/* We were unbalanced, so reset the balancing interval */
-		sd->balance_interval = sd->min_interval;
-	} else {
-		/*
-		 * If we've begun active balancing, start to back off. This
-		 * case may not be covered by the all_pinned logic if there
-		 * is only 1 task on the busy runqueue (because we don't call
-		 * move_tasks).
-		 */
-		if (sd->balance_interval < sd->max_interval)
-			sd->balance_interval *= 2;
-	}
-
-	if (!nr_moved && !sd_idle && sd->flags & SD_SHARE_CPUPOWER)
-		return -1;
-	return nr_moved;
-
-out_balanced:
-	schedstat_inc(sd, lb_balanced[idle]);
-
-	sd->nr_balance_failed = 0;
-
-out_one_pinned:
-	/* tune up the balancing interval */
-	if ((all_pinned && sd->balance_interval < MAX_PINNED_INTERVAL) ||
-			(sd->balance_interval < sd->max_interval))
-		sd->balance_interval *= 2;
-
-	if (!sd_idle && sd->flags & SD_SHARE_CPUPOWER)
-		return -1;
-	return 0;
-}
-
-/*
- * Check this_cpu to ensure it is balanced within domain. Attempt to move
- * tasks if there is an imbalance.
- *
- * Called from schedule when this_rq is about to become idle (NEWLY_IDLE).
- * this_rq is locked.
- */
-static int load_balance_newidle(int this_cpu, runqueue_t *this_rq,
-				struct sched_domain *sd)
-{
-	struct sched_group *group;
-	runqueue_t *busiest = NULL;
-	unsigned long imbalance;
-	int nr_moved = 0;
-	int sd_idle = 0;
-
-	if (sd->flags & SD_SHARE_CPUPOWER)
-		sd_idle = 1;
-
-	schedstat_inc(sd, lb_cnt[NEWLY_IDLE]);
-	group = find_busiest_group(sd, this_cpu, &imbalance, NEWLY_IDLE, &sd_idle);
-	if (!group) {
-		schedstat_inc(sd, lb_nobusyg[NEWLY_IDLE]);
-		goto out_balanced;
-	}
-
-	busiest = find_busiest_queue(group);
-	if (!busiest) {
-		schedstat_inc(sd, lb_nobusyq[NEWLY_IDLE]);
-		goto out_balanced;
-	}
-
-	BUG_ON(busiest == this_rq);
-
-	schedstat_add(sd, lb_imbalance[NEWLY_IDLE], imbalance);
-
-	nr_moved = 0;
-	if (busiest->nr_running > 1) {
-		/* Attempt to move tasks */
-		double_lock_balance(this_rq, busiest);
-		nr_moved = move_tasks(this_rq, this_cpu, busiest,
-					imbalance, sd, NEWLY_IDLE, NULL);
-		spin_unlock(&busiest->lock);
-	}
-
-	if (!nr_moved) {
-		schedstat_inc(sd, lb_failed[NEWLY_IDLE]);
-		if (!sd_idle && sd->flags & SD_SHARE_CPUPOWER)
-			return -1;
-	} else
-		sd->nr_balance_failed = 0;
-
-	return nr_moved;
-
-out_balanced:
-	schedstat_inc(sd, lb_balanced[NEWLY_IDLE]);
-	if (!sd_idle && sd->flags & SD_SHARE_CPUPOWER)
-		return -1;
-	sd->nr_balance_failed = 0;
-	return 0;
-}
-
-/*
- * idle_balance is called by schedule() if this_cpu is about to become
- * idle. Attempts to pull tasks from other CPUs.
- */
-static inline void idle_balance(int this_cpu, runqueue_t *this_rq)
-{
-	struct sched_domain *sd;
-
-	for_each_domain(this_cpu, sd) {
-		if (sd->flags & SD_BALANCE_NEWIDLE) {
-			if (load_balance_newidle(this_cpu, this_rq, sd)) {
-				/* We've pulled tasks over so stop searching */
-				break;
-			}
-		}
-	}
-}
-
-/*
- * active_load_balance is run by migration threads. It pushes running tasks
- * off the busiest CPU onto idle CPUs. It requires at least 1 task to be
- * running on each physical CPU where possible, and avoids physical /
- * logical imbalances.
- *
- * Called with busiest_rq locked.
- */
-static void active_load_balance(runqueue_t *busiest_rq, int busiest_cpu)
-{
-	struct sched_domain *sd;
-	runqueue_t *target_rq;
-	int target_cpu = busiest_rq->push_cpu;
-
-	if (busiest_rq->nr_running <= 1)
-		/* no task to move */
-		return;
-
-	target_rq = cpu_rq(target_cpu);
-
-	/*
-	 * This condition is "impossible", if it occurs
-	 * we need to fix it.  Originally reported by
-	 * Bjorn Helgaas on a 128-cpu setup.
-	 */
-	BUG_ON(busiest_rq == target_rq);
-
-	/* move a task from busiest_rq to target_rq */
-	double_lock_balance(busiest_rq, target_rq);
-
-	/* Search for an sd spanning us and the target CPU. */
-	for_each_domain(target_cpu, sd)
-		if ((sd->flags & SD_LOAD_BALANCE) &&
-			cpu_isset(busiest_cpu, sd->span))
-				break;
-
-	if (unlikely(sd == NULL))
-		goto out;
-
-	schedstat_inc(sd, alb_cnt);
-
-	if (move_tasks(target_rq, target_cpu, busiest_rq, 1, sd, SCHED_IDLE, NULL))
-		schedstat_inc(sd, alb_pushed);
-	else
-		schedstat_inc(sd, alb_failed);
-out:
-	spin_unlock(&target_rq->lock);
-}
-
-/*
- * rebalance_tick will get called every timer tick, on every CPU.
- *
- * It checks each scheduling domain to see if it is due to be balanced,
- * and initiates a balancing operation if so.
- *
- * Balancing parameters are set up in arch_init_sched_domains.
- */
-
-/* Don't have all balancing operations going off at once */
-#define CPU_OFFSET(cpu) (HZ * cpu / NR_CPUS)
-
-static void rebalance_tick(int this_cpu, runqueue_t *this_rq,
-			   enum idle_type idle)
-{
-	unsigned long old_load, this_load;
-	unsigned long j = jiffies + CPU_OFFSET(this_cpu);
-	struct sched_domain *sd;
-	int i;
-
-	this_load = this_rq->nr_running * SCHED_LOAD_SCALE;
-	/* Update our load */
-	for (i = 0; i < 3; i++) {
-		unsigned long new_load = this_load;
-		int scale = 1 << i;
-		old_load = this_rq->cpu_load[i];
-		/*
-		 * Round up the averaging division if load is increasing. This
-		 * prevents us from getting stuck on 9 if the load is 10, for
-		 * example.
-		 */
-		if (new_load > old_load)
-			new_load += scale-1;
-		this_rq->cpu_load[i] = (old_load*(scale-1) + new_load) / scale;
-	}
-
-	for_each_domain(this_cpu, sd) {
-		unsigned long interval;
-
-		if (!(sd->flags & SD_LOAD_BALANCE))
-			continue;
-
-		interval = sd->balance_interval;
-		if (idle != SCHED_IDLE)
-			interval *= sd->busy_factor;
-
-		/* scale ms to jiffies */
-		interval = msecs_to_jiffies(interval);
-		if (unlikely(!interval))
-			interval = 1;
-
-		if (j - sd->last_balance >= interval) {
-			if (load_balance(this_cpu, this_rq, sd, idle)) {
-				/*
-				 * We've pulled tasks over so either we're no
-				 * longer idle, or one of our SMT siblings is
-				 * not idle.
-				 */
-				idle = NOT_IDLE;
-			}
-			sd->last_balance += interval;
-		}
-	}
-}
-#else
 /*
  * on UP we do not need to balance between CPUs:
  */
@@ -2395,24 +1265,10 @@ static inline void rebalance_tick(int cpu, runqueue_t *rq, enum idle_type idle)
 static inline void idle_balance(int cpu, runqueue_t *rq)
 {
 }
-#endif
 
 static inline int wake_priority_sleeper(runqueue_t *rq)
 {
-	int ret = 0;
-#ifdef CONFIG_SCHED_SMT
-	spin_lock(&rq->lock);
-	/*
-	 * If an SMT sibling task has been put to sleep for priority
-	 * reasons reschedule the idle task to see if it can now run.
-	 */
-	if (rq->nr_running) {
-		resched_task(rq->idle);
-		ret = 1;
-	}
-	spin_unlock(&rq->lock);
-#endif
-	return ret;
+	return 0;
 }
 
 DEFINE_PER_CPU(struct kernel_stat, kstat);
@@ -2446,12 +1302,10 @@ unsigned long long current_sched_time(const task_t *tsk)
 }
 
 /*
- * We place interactive tasks back into the active array, if possible.
  *
  * To guarantee that this does not starve expired tasks we ignore the
  * interactivity of a task if the first expired task had to wait more
  * than a 'reasonable' amount of time. This deadline timeout is
- * load-dependent, as the frequency of array switched decreases with
  * increasing number of running tasks. We also ignore the interactivity
  * if a better static_prio task has expired:
  */
@@ -2476,9 +1330,9 @@ void account_user_time(struct task_struct *p, cputime_t cputime)
 
 	/* Add user time to cpustat. */
 	tmp = cputime_to_cputime64(cputime);
-	if (TASK_NICE(p) > 0)
+	/*if (TASK_NICE(p) > 0) Ya no existe mas el tema de nice.
 		cpustat->nice = cputime64_add(cpustat->nice, tmp);
-	else
+	else*/
 		cpustat->user = cputime64_add(cpustat->user, tmp);
 }
 
@@ -2540,12 +1394,9 @@ void account_steal_time(struct task_struct *p, cputime_t steal)
  * This function gets called by the timer code, with HZ frequency.
  * We call it with interrupts disabled.
  *
- * It also gets called by the fork code, when changing the parent's
- * timeslices.
  */
 void scheduler_tick(void)
 {
-	int cpu = smp_processor_id();
 	runqueue_t *rq = this_rq();
 	task_t *p = current;
 	unsigned long long now = sched_clock();
@@ -2554,19 +1405,8 @@ void scheduler_tick(void)
 
 	rq->timestamp_last_tick = now;
 
-	if (p == rq->idle) {
-		if (wake_priority_sleeper(rq))
-			goto out;
-		rebalance_tick(cpu, rq, SCHED_IDLE);
-		return;
-	}
+	if (p == rq->idle) return;
 
-	/* Task might have expired already, but not scheduled off yet */
-	if (p->array != rq->active) {
-		set_tsk_need_resched(p);
-		goto out;
-	}
-	spin_lock(&rq->lock);
 	/*
 	 * The task was running during this tick - update the
 	 * time slice counter. Note: we do not update a thread's
@@ -2574,231 +1414,14 @@ void scheduler_tick(void)
 	 * timeslice. This makes it possible for interactive tasks
 	 * to use up their timeslices at their highest priority levels.
 	 */
-	if (rt_task(p)) {
-		/*
-		 * RR tasks need a special form of timeslice management.
-		 * FIFO tasks have no timeslices.
-		 */
-		if ((p->policy == SCHED_RR) && !--p->time_slice) {
-			p->time_slice = task_timeslice(p);
-			p->first_time_slice = 0;
-			set_tsk_need_resched(p);
-
-			/* put it at the end of the queue: */
-			requeue_task(p, rq->active);
-		}
-		goto out_unlock;
-	}
+	/* Si se le acaba el tiempo */
 	if (!--p->time_slice) {
-		dequeue_task(p, rq->active);
 		set_tsk_need_resched(p);
-		p->prio = effective_prio(p);
-		p->time_slice = task_timeslice(p);
-		p->first_time_slice = 0;
-
-		if (!rq->expired_timestamp)
-			rq->expired_timestamp = jiffies;
-		if (!TASK_INTERACTIVE(p) || EXPIRED_STARVING(rq)) {
-			enqueue_task(p, rq->expired);
-			if (p->static_prio < rq->best_expired_prio)
-				rq->best_expired_prio = p->static_prio;
-		} else
-			enqueue_task(p, rq->active);
-	} else {
-		/*
-		 * Prevent a too long timeslice allowing a task to monopolize
-		 * the CPU. We do this by splitting up the timeslice into
-		 * smaller pieces.
-		 *
-		 * Note: this does not mean the task's timeslices expire or
-		 * get lost in any way, they just might be preempted by
-		 * another task of equal priority. (one with higher
-		 * priority would have preempted this task already.) We
-		 * requeue this task to the end of the list on this priority
-		 * level, which is in essence a round-robin of tasks with
-		 * equal priority.
-		 *
-		 * This only applies to tasks in the interactive
-		 * delta range with at least TIMESLICE_GRANULARITY to requeue.
-		 */
-		if (TASK_INTERACTIVE(p) && !((task_timeslice(p) -
-			p->time_slice) % TIMESLICE_GRANULARITY(p)) &&
-			(p->time_slice >= TIMESLICE_GRANULARITY(p)) &&
-			(p->array == rq->active)) {
-
-			requeue_task(p, rq->active);
-			set_tsk_need_resched(p);
-		}
-	}
-out_unlock:
-	spin_unlock(&rq->lock);
-out:
-	rebalance_tick(cpu, rq, NOT_IDLE);
+		p->time_slice = DEF_TIMESLICE;
+ 	}
 }
 
-#ifdef CONFIG_SCHED_SMT
-static inline void wakeup_busy_runqueue(runqueue_t *rq)
-{
-	/* If an SMT runqueue is sleeping due to priority reasons wake it up */
-	if (rq->curr == rq->idle && rq->nr_running)
-		resched_task(rq->idle);
-}
 
-static inline void wake_sleeping_dependent(int this_cpu, runqueue_t *this_rq)
-{
-	struct sched_domain *tmp, *sd = NULL;
-	cpumask_t sibling_map;
-	int i;
-
-	for_each_domain(this_cpu, tmp)
-		if (tmp->flags & SD_SHARE_CPUPOWER)
-			sd = tmp;
-
-	if (!sd)
-		return;
-
-	/*
-	 * Unlock the current runqueue because we have to lock in
-	 * CPU order to avoid deadlocks. Caller knows that we might
-	 * unlock. We keep IRQs disabled.
-	 */
-	spin_unlock(&this_rq->lock);
-
-	sibling_map = sd->span;
-
-	for_each_cpu_mask(i, sibling_map)
-		spin_lock(&cpu_rq(i)->lock);
-	/*
-	 * We clear this CPU from the mask. This both simplifies the
-	 * inner loop and keps this_rq locked when we exit:
-	 */
-	cpu_clear(this_cpu, sibling_map);
-
-	for_each_cpu_mask(i, sibling_map) {
-		runqueue_t *smt_rq = cpu_rq(i);
-
-		wakeup_busy_runqueue(smt_rq);
-	}
-
-	for_each_cpu_mask(i, sibling_map)
-		spin_unlock(&cpu_rq(i)->lock);
-	/*
-	 * We exit with this_cpu's rq still held and IRQs
-	 * still disabled:
-	 */
-}
-
-/*
- * number of 'lost' timeslices this task wont be able to fully
- * utilize, if another task runs on a sibling. This models the
- * slowdown effect of other tasks running on siblings:
- */
-static inline unsigned long smt_slice(task_t *p, struct sched_domain *sd)
-{
-	return p->time_slice * (100 - sd->per_cpu_gain) / 100;
-}
-
-static inline int dependent_sleeper(int this_cpu, runqueue_t *this_rq)
-{
-	struct sched_domain *tmp, *sd = NULL;
-	cpumask_t sibling_map;
-	prio_array_t *array;
-	int ret = 0, i;
-	task_t *p;
-
-	for_each_domain(this_cpu, tmp)
-		if (tmp->flags & SD_SHARE_CPUPOWER)
-			sd = tmp;
-
-	if (!sd)
-		return 0;
-
-	/*
-	 * The same locking rules and details apply as for
-	 * wake_sleeping_dependent():
-	 */
-	spin_unlock(&this_rq->lock);
-	sibling_map = sd->span;
-	for_each_cpu_mask(i, sibling_map)
-		spin_lock(&cpu_rq(i)->lock);
-	cpu_clear(this_cpu, sibling_map);
-
-	/*
-	 * Establish next task to be run - it might have gone away because
-	 * we released the runqueue lock above:
-	 */
-	if (!this_rq->nr_running)
-		goto out_unlock;
-	array = this_rq->active;
-	if (!array->nr_active)
-		array = this_rq->expired;
-	BUG_ON(!array->nr_active);
-
-	p = list_entry(array->queue[sched_find_first_bit(array->bitmap)].next,
-		task_t, run_list);
-
-	for_each_cpu_mask(i, sibling_map) {
-		runqueue_t *smt_rq = cpu_rq(i);
-		task_t *smt_curr = smt_rq->curr;
-
-		/* Kernel threads do not participate in dependent sleeping */
-		if (!p->mm || !smt_curr->mm || rt_task(p))
-			goto check_smt_task;
-
-		/*
-		 * If a user task with lower static priority than the
-		 * running task on the SMT sibling is trying to schedule,
-		 * delay it till there is proportionately less timeslice
-		 * left of the sibling task to prevent a lower priority
-		 * task from using an unfair proportion of the
-		 * physical cpu's resources. -ck
-		 */
-		if (rt_task(smt_curr)) {
-			/*
-			 * With real time tasks we run non-rt tasks only
-			 * per_cpu_gain% of the time.
-			 */
-			if ((jiffies % DEF_TIMESLICE) >
-				(sd->per_cpu_gain * DEF_TIMESLICE / 100))
-					ret = 1;
-		} else
-			if (smt_curr->static_prio < p->static_prio &&
-				!TASK_PREEMPTS_CURR(p, smt_rq) &&
-				smt_slice(smt_curr, sd) > task_timeslice(p))
-					ret = 1;
-
-check_smt_task:
-		if ((!smt_curr->mm && smt_curr != smt_rq->idle) ||
-			rt_task(smt_curr))
-				continue;
-		if (!p->mm) {
-			wakeup_busy_runqueue(smt_rq);
-			continue;
-		}
-
-		/*
-		 * Reschedule a lower priority task on the SMT sibling for
-		 * it to be put to sleep, or wake it up if it has been put to
-		 * sleep for priority reasons to see if it should run now.
-		 */
-		if (rt_task(p)) {
-			if ((jiffies % DEF_TIMESLICE) >
-				(sd->per_cpu_gain * DEF_TIMESLICE / 100))
-					resched_task(smt_curr);
-		} else {
-			if (TASK_PREEMPTS_CURR(p, smt_rq) &&
-				smt_slice(p, sd) > task_timeslice(smt_curr))
-					resched_task(smt_curr);
-			else
-				wakeup_busy_runqueue(smt_rq);
-		}
-	}
-out_unlock:
-	for_each_cpu_mask(i, sibling_map)
-		spin_unlock(&cpu_rq(i)->lock);
-	return ret;
-}
-#else
 static inline void wake_sleeping_dependent(int this_cpu, runqueue_t *this_rq)
 {
 }
@@ -2807,7 +1430,6 @@ static inline int dependent_sleeper(int this_cpu, runqueue_t *this_rq)
 {
 	return 0;
 }
-#endif
 
 #if defined(CONFIG_PREEMPT) && defined(CONFIG_DEBUG_PREEMPT)
 
@@ -2846,14 +1468,14 @@ EXPORT_SYMBOL(sub_preempt_count);
  */
 asmlinkage void __sched schedule(void)
 {
+
 	long *switch_count;
 	task_t *prev, *next;
 	runqueue_t *rq;
-	prio_array_t *array;
-	struct list_head *queue;
 	unsigned long long now;
-	unsigned long run_time;
-	int cpu, idx, new_prio;
+	int cpu;
+	struct grupo_struct *grupo_actual;
+	struct usuario_struct *user_actual;
 
 	/*
 	 * Test if we are atomic.  Since do_exit() needs to call into
@@ -2869,15 +1491,16 @@ asmlinkage void __sched schedule(void)
 		}
 	}
 	profile_hit(SCHED_PROFILING, __builtin_return_address(0));
-
+	
 need_resched:
 	preempt_disable();
 	prev = current;
 	release_kernel_lock(prev);
 need_resched_nonpreemptible:
 	rq = this_rq();
+	spin_lock_irq(&rq->lock);
 
-	/*
+	/*	
 	 * The idle thread is not allowed to schedule!
 	 * Remove this check after it has been exercised a bit.
 	 */
@@ -2885,23 +1508,9 @@ need_resched_nonpreemptible:
 		printk(KERN_ERR "bad: scheduling from the idle thread!\n");
 		dump_stack();
 	}
-
+	
 	schedstat_inc(rq, sched_cnt);
 	now = sched_clock();
-	if (likely((long long)(now - prev->timestamp) < NS_MAX_SLEEP_AVG)) {
-		run_time = now - prev->timestamp;
-		if (unlikely((long long)(now - prev->timestamp) < 0))
-			run_time = 0;
-	} else
-		run_time = NS_MAX_SLEEP_AVG;
-
-	/*
-	 * Tasks charged proportionately less run_time at high sleep_avg to
-	 * delay them losing their interactive status
-	 */
-	run_time /= (CURRENT_BONUS(prev) ? : 1);
-
-	spin_lock_irq(&rq->lock);
 
 	if (unlikely(prev->flags & PF_DEAD))
 		prev->state = EXIT_DEAD;
@@ -2918,86 +1527,39 @@ need_resched_nonpreemptible:
 			deactivate_task(prev, rq);
 		}
 	}
-
+	/* Si no existe una lista de grupos disponibles para ejecutar
+           calendarizar a idle*/
 	cpu = smp_processor_id();
-	if (unlikely(!rq->nr_running)) {
-go_idle:
-		idle_balance(cpu, rq);
-		if (!rq->nr_running) {
-			next = rq->idle;
-			rq->expired_timestamp = 0;
-			wake_sleeping_dependent(cpu, rq);
-			/*
-			 * wake_sleeping_dependent() might have released
-			 * the runqueue, so break out if we got new
-			 * tasks meanwhile:
-			 */
-			if (!rq->nr_running)
-				goto switch_tasks;
-		}
-	} else {
-		if (dependent_sleeper(cpu, rq)) {
-			next = rq->idle;
-			goto switch_tasks;
-		}
-		/*
-		 * dependent_sleeper() releases and reacquires the runqueue
-		 * lock, hence go into the idle loop if the rq went
-		 * empty meanwhile:
-		 */
-		if (unlikely(!rq->nr_running))
-			goto go_idle;
-	}
-
-	array = rq->active;
-	if (unlikely(!array->nr_active)) {
-		/*
-		 * Switch the active and expired arrays.
-		 */
-		schedstat_inc(rq, sched_switch);
-		rq->active = rq->expired;
-		rq->expired = array;
-		array = rq->active;
+	if (rq->grupos_lista == NULL) 
+	{
+		next = rq->idle;
 		rq->expired_timestamp = 0;
-		rq->best_expired_prio = MAX_PRIO;
 	}
-
-	idx = sched_find_first_bit(array->bitmap);
-	queue = array->queue + idx;
-	next = list_entry(queue->next, task_t, run_list);
-
-	if (!rt_task(next) && next->activated > 0) {
-		unsigned long long delta = now - next->timestamp;
-		if (unlikely((long long)(now - next->timestamp) < 0))
-			delta = 0;
-
-		if (next->activated == 1)
-			delta = delta * (ON_RUNQUEUE_WEIGHT * 128 / 100) / 128;
-
-		array = next->array;
-		new_prio = recalc_task_prio(next, next->timestamp + delta);
-
-		if (unlikely(next->prio != new_prio)) {
-			dequeue_task(next, array);
-			next->prio = new_prio;
-			enqueue_task(next, array);
-		} else
-			requeue_task(next, array);
+	else
+	{
+		/* Obtener un grupo y luego mover la punta de la lista al siguente elemento */
+		grupo_actual = rq->grupos_lista;
+		rq->grupos_lista = list_entry(rq->grupos_lista->lista.next, struct grupo_struct, lista);
+		/* Obtener un usuario del grupo y luego mover la punta de la lista al siguente elemento */
+		user_actual = grupo_actual->usuarios_lista;
+		grupo_actual->usuarios_lista = list_entry(grupo_actual->usuarios_lista->lista.next, struct usuario_struct, lista);
+		/* Obtener un proceso del usuario y luego mover la punta de la lista al siguente elemento */
+		next = user_actual->procesos_lista;
+		user_actual->procesos_lista =  list_entry(user_actual->procesos_lista->run_list.next, struct task_struct, run_list);
 	}
-	next->activated = 0;
-switch_tasks:
+	
+	/* Iniciar el proceso de calendarizacion y coleccion de 
+	   datos para el proceso, usuario y grupo seleccionado */
 	if (next == rq->idle)
 		schedstat_inc(rq, sched_goidle);
 	prefetch(next);
 	prefetch_stack(next);
+
 	clear_tsk_need_resched(prev);
 	rcu_qsctr_inc(task_cpu(prev));
 
 	update_cpu_clock(prev, rq, now);
 
-	prev->sleep_avg -= run_time;
-	if ((long)prev->sleep_avg <= 0)
-		prev->sleep_avg = 0;
 	prev->timestamp = prev->last_ran = now;
 
 	sched_info_switch(prev, next);
@@ -3016,6 +1578,7 @@ switch_tasks:
 		 * frame will be invalid.
 		 */
 		finish_task_switch(this_rq(), prev);
+
 	} else
 		spin_unlock_irq(&rq->lock);
 
@@ -3192,8 +1755,7 @@ void fastcall __wake_up_locked(wait_queue_head_t *q, unsigned int mode)
  *
  * On UP it can prevent extra preemption.
  */
-void fastcall
-__wake_up_sync(wait_queue_head_t *q, unsigned int mode, int nr_exclusive)
+void fastcall __wake_up_sync(wait_queue_head_t *q, unsigned int mode, int nr_exclusive)
 {
 	unsigned long flags;
 	int sync = 1;
@@ -3320,8 +1882,7 @@ out:
 EXPORT_SYMBOL(wait_for_completion_interruptible);
 
 unsigned long fastcall __sched
-wait_for_completion_interruptible_timeout(struct completion *x,
-					  unsigned long timeout)
+wait_for_completion_interruptible_timeout(struct completion *x, unsigned long timeout)
 {
 	might_sleep();
 
@@ -3430,129 +1991,100 @@ EXPORT_SYMBOL(sleep_on_timeout);
 
 void set_user_nice(task_t *p, long nice)
 {
-	unsigned long flags;
-	prio_array_t *array;
-	runqueue_t *rq;
-	int old_prio, new_prio, delta;
-
-	if (TASK_NICE(p) == nice || nice < -20 || nice > 19)
-		return;
-	/*
-	 * We have to be careful, if called from sys_setpriority(),
-	 * the task might be in the middle of scheduling on another CPU.
-	 */
-	rq = task_rq_lock(p, &flags);
-	/*
-	 * The RT priorities are set via sched_setscheduler(), but we still
-	 * allow the 'normal' nice value to be set - but as expected
-	 * it wont have any effect on scheduling until the task is
-	 * not SCHED_NORMAL:
-	 */
-	if (rt_task(p)) {
-		p->static_prio = NICE_TO_PRIO(nice);
-		goto out_unlock;
-	}
-	array = p->array;
-	if (array)
-		dequeue_task(p, array);
-
-	old_prio = p->prio;
-	new_prio = NICE_TO_PRIO(nice);
-	delta = new_prio - old_prio;
-	p->static_prio = NICE_TO_PRIO(nice);
-	p->prio += delta;
-
-	if (array) {
-		enqueue_task(p, array);
-		/*
-		 * If the task increased its priority or is running and
-		 * lowered its priority, then reschedule its CPU:
-		 */
-		if (delta < 0 || (delta > 0 && task_running(rq, p)))
-			resched_task(rq->curr);
-	}
-out_unlock:
-	task_rq_unlock(rq, &flags);
 }
 
 EXPORT_SYMBOL(set_user_nice);
 
-/*
+
+#ifdef CONFIG_SCHEDSTATS
+/* Tratativas de llamadas al sistema para configurar las estadisticas */
+
+asmlinkage long sys_sched_set_stat(int parametro)
+{
+	runqueue_t *rq = this_rq();
+	
+	int ret = -EINVAL;
+	switch (parametro){
+	case 0:	/* cera las estadisticas */
+		if(rq->stat == 1){
+			cerar_stat();
+			ret = 0;
+		}else
+			ret = -1;
+		break;
+	case 1:	/* habilita las estadisticas */
+		if(rq->stat == 0){
+			rq->stat = 1;
+			ret = 0;
+		}else
+			ret = -1;
+		break;
+	case 2: /* deshabilita las estadisticas */
+		if(rq->stat == 1){
+			rq->stat = 0;
+			ret = 0;
+		}else
+			ret = -1;
+		break;
+	}
+	
+	return ret;
+	
+}
+
+asmlinkage long sys_sched_get_stat(void)
+{
+	runqueue_t *rq = this_rq();
+
+	return rq->stat;
+	
+}
+#else
+asmlinkage long sys_sched_set_stat(int parametro){ return 0; }
+asmlinkage long sys_sched_get_stat(void){ return 0; }
+#endif
+
+/* NO SE APLICA A FAIR SHARE
  * can_nice - check if a task can reduce its nice value
  * @p: task
  * @nice: nice value
  */
 int can_nice(const task_t *p, const int nice)
 {
-	/* convert nice value [19,-20] to rlimit style value [1,40] */
-	int nice_rlim = 20 - nice;
-	return (nice_rlim <= p->signal->rlim[RLIMIT_NICE].rlim_cur ||
-		capable(CAP_SYS_NICE));
+	return 0;
 }
 
 #ifdef __ARCH_WANT_SYS_NICE
 
-/*
+/* NO SE APLICA A FAIR SHARE
  * sys_nice - change the priority of the current process.
  * @increment: priority increment
  *
- * sys_setpriority is a more generic, but much slower function that
- * does similar things.
  */
 asmlinkage long sys_nice(int increment)
 {
-	int retval;
-	long nice;
-
-	/*
-	 * Setpriority might change our priority at the same moment.
-	 * We don't have to worry. Conceptually one call occurs first
-	 * and we have a single winner.
-	 */
-	if (increment < -40)
-		increment = -40;
-	if (increment > 40)
-		increment = 40;
-
-	nice = PRIO_TO_NICE(current->static_prio) + increment;
-	if (nice < -20)
-		nice = -20;
-	if (nice > 19)
-		nice = 19;
-
-	if (increment < 0 && !can_nice(current, nice))
-		return -EPERM;
-
-	retval = security_task_setnice(current, nice);
-	if (retval)
-		return retval;
-
-	set_user_nice(current, nice);
 	return 0;
 }
 
 #endif
 
-/**
+/**  NO SE APLICA A FAIR SHARE
  * task_prio - return the priority value of a given task.
  * @p: the task in question.
  *
- * This is the priority value as seen by users in /proc.
- * RT tasks are offset by -200. Normal tasks are centered
- * around 0, value goes from -16 to +15.
  */
 int task_prio(const task_t *p)
 {
-	return p->prio - MAX_RT_PRIO;
+	return 0;
 }
 
-/**
+/**  NO SE APLICA A FAIR SHARE
  * task_nice - return the nice value of a given task.
  * @p: the task in question.
  */
 int task_nice(const task_t *p)
 {
-	return TASK_NICE(p);
+	return 0;
 }
 EXPORT_SYMBOL_GPL(task_nice);
 
@@ -3585,19 +2117,8 @@ static inline task_t *find_process_by_pid(pid_t pid)
 	return pid ? find_task_by_pid(pid) : current;
 }
 
-/* Actually do priority change: must hold rq lock. */
-static void __setscheduler(struct task_struct *p, int policy, int prio)
-{
-	BUG_ON(p->array);
-	p->policy = policy;
-	p->rt_priority = prio;
-	if (policy != SCHED_NORMAL)
-		p->prio = MAX_RT_PRIO-1 - p->rt_priority;
-	else
-		p->prio = p->static_prio;
-}
 
-/**
+/**  NO SE APLICA A FAIR SHARE
  * sched_setscheduler - change the scheduling policy and/or RT priority of
  * a thread.
  * @p: the task in question.
@@ -3607,110 +2128,11 @@ static void __setscheduler(struct task_struct *p, int policy, int prio)
 int sched_setscheduler(struct task_struct *p, int policy,
 		       struct sched_param *param)
 {
-	int retval;
-	int oldprio, oldpolicy = -1;
-	prio_array_t *array;
-	unsigned long flags;
-	runqueue_t *rq;
-
-recheck:
-	/* double check policy once rq lock held */
-	if (policy < 0)
-		policy = oldpolicy = p->policy;
-	else if (policy != SCHED_FIFO && policy != SCHED_RR &&
-				policy != SCHED_NORMAL)
-			return -EINVAL;
-	/*
-	 * Valid priorities for SCHED_FIFO and SCHED_RR are
-	 * 1..MAX_USER_RT_PRIO-1, valid priority for SCHED_NORMAL is 0.
-	 */
-	if (param->sched_priority < 0 ||
-	    (p->mm && param->sched_priority > MAX_USER_RT_PRIO-1) ||
-	    (!p->mm && param->sched_priority > MAX_RT_PRIO-1))
-		return -EINVAL;
-	if ((policy == SCHED_NORMAL) != (param->sched_priority == 0))
-		return -EINVAL;
-
-	/*
-	 * Allow unprivileged RT tasks to decrease priority:
-	 */
-	if (!capable(CAP_SYS_NICE)) {
-		/* can't change policy */
-		if (policy != p->policy &&
-			!p->signal->rlim[RLIMIT_RTPRIO].rlim_cur)
-			return -EPERM;
-		/* can't increase priority */
-		if (policy != SCHED_NORMAL &&
-		    param->sched_priority > p->rt_priority &&
-		    param->sched_priority >
-				p->signal->rlim[RLIMIT_RTPRIO].rlim_cur)
-			return -EPERM;
-		/* can't change other user's priorities */
-		if ((current->euid != p->euid) &&
-		    (current->euid != p->uid))
-			return -EPERM;
-	}
-
-	retval = security_task_setscheduler(p, policy, param);
-	if (retval)
-		return retval;
-	/*
-	 * To be able to change p->policy safely, the apropriate
-	 * runqueue lock must be held.
-	 */
-	rq = task_rq_lock(p, &flags);
-	/* recheck policy now with rq lock held */
-	if (unlikely(oldpolicy != -1 && oldpolicy != p->policy)) {
-		policy = oldpolicy = -1;
-		task_rq_unlock(rq, &flags);
-		goto recheck;
-	}
-	array = p->array;
-	if (array)
-		deactivate_task(p, rq);
-	oldprio = p->prio;
-	__setscheduler(p, policy, param->sched_priority);
-	if (array) {
-		__activate_task(p, rq);
-		/*
-		 * Reschedule if we are currently running on this runqueue and
-		 * our priority decreased, or if we are not currently running on
-		 * this runqueue and our priority is higher than the current's
-		 */
-		if (task_running(rq, p)) {
-			if (p->prio > oldprio)
-				resched_task(rq->curr);
-		} else if (TASK_PREEMPTS_CURR(p, rq))
-			resched_task(rq->curr);
-	}
-	task_rq_unlock(rq, &flags);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(sched_setscheduler);
 
-static int
-do_sched_setscheduler(pid_t pid, int policy, struct sched_param __user *param)
-{
-	int retval;
-	struct sched_param lparam;
-	struct task_struct *p;
-
-	if (!param || pid < 0)
-		return -EINVAL;
-	if (copy_from_user(&lparam, param, sizeof(struct sched_param)))
-		return -EFAULT;
-	read_lock_irq(&tasklist_lock);
-	p = find_process_by_pid(pid);
-	if (!p) {
-		read_unlock_irq(&tasklist_lock);
-		return -ESRCH;
-	}
-	retval = sched_setscheduler(p, policy, &lparam);
-	read_unlock_irq(&tasklist_lock);
-	return retval;
-}
-
-/**
+/**  NO SE APLICA A FAIR SHARE
  * sys_sched_setscheduler - set/change the scheduler policy and RT priority
  * @pid: the pid in question.
  * @policy: new policy.
@@ -3719,43 +2141,26 @@ do_sched_setscheduler(pid_t pid, int policy, struct sched_param __user *param)
 asmlinkage long sys_sched_setscheduler(pid_t pid, int policy,
 				       struct sched_param __user *param)
 {
-	return do_sched_setscheduler(pid, policy, param);
+	return 0;
 }
 
-/**
+/**  NO SE APLICA A FAIR SHARE
  * sys_sched_setparam - set/change the RT priority of a thread
  * @pid: the pid in question.
  * @param: structure containing the new RT priority.
  */
 asmlinkage long sys_sched_setparam(pid_t pid, struct sched_param __user *param)
 {
-	return do_sched_setscheduler(pid, -1, param);
+	return 0;
 }
 
-/**
+/**  NO SE APLICA A FAIR SHARE
  * sys_sched_getscheduler - get the policy (scheduling class) of a thread
  * @pid: the pid in question.
  */
 asmlinkage long sys_sched_getscheduler(pid_t pid)
 {
-	int retval = -EINVAL;
-	task_t *p;
-
-	if (pid < 0)
-		goto out_nounlock;
-
-	retval = -ESRCH;
-	read_lock(&tasklist_lock);
-	p = find_process_by_pid(pid);
-	if (p) {
-		retval = security_task_getscheduler(p);
-		if (!retval)
-			retval = p->policy;
-	}
-	read_unlock(&tasklist_lock);
-
-out_nounlock:
-	return retval;
+	return SCHED_NORMAL;
 }
 
 /**
@@ -3877,11 +2282,9 @@ asmlinkage long sys_sched_setaffinity(pid_t pid, unsigned int len,
 cpumask_t cpu_present_map;
 EXPORT_SYMBOL(cpu_present_map);
 
-#ifndef CONFIG_SMP
 cpumask_t cpu_online_map = CPU_MASK_ALL;
 EXPORT_SYMBOL_GPL(cpu_online_map);
 cpumask_t cpu_possible_map = CPU_MASK_ALL;
-#endif
 
 long sched_getaffinity(pid_t pid, cpumask_t *mask)
 {
@@ -3937,46 +2340,11 @@ asmlinkage long sys_sched_getaffinity(pid_t pid, unsigned int len,
  * sys_sched_yield - yield the current processor to other threads.
  *
  * this function yields the current CPU by moving the calling thread
- * to the expired array. If there are no other threads running on this
  * CPU then this function will return.
  */
 asmlinkage long sys_sched_yield(void)
 {
 	runqueue_t *rq = this_rq_lock();
-	prio_array_t *array = current->array;
-	prio_array_t *target = rq->expired;
-
-	schedstat_inc(rq, yld_cnt);
-	/*
-	 * We implement yielding by moving the task into the expired
-	 * queue.
-	 *
-	 * (special rule: RT tasks will just roundrobin in the active
-	 *  array.)
-	 */
-	if (rt_task(current))
-		target = rq->active;
-
-	if (array->nr_active == 1) {
-		schedstat_inc(rq, yld_act_empty);
-		if (!rq->expired->nr_active)
-			schedstat_inc(rq, yld_both_empty);
-	} else if (!rq->expired->nr_active)
-		schedstat_inc(rq, yld_exp_empty);
-
-	if (array != target) {
-		dequeue_task(current, array);
-		enqueue_task(current, target);
-	} else
-		/*
-		 * requeue_task is cheaper so perform that if possible.
-		 */
-		requeue_task(current, array);
-
-	/*
-	 * Since we are going to call schedule() anyway, there's
-	 * no need to preempt or enable interrupts:
-	 */
 	__release(rq->lock);
 	_raw_spin_unlock(&rq->lock);
 	preempt_enable_no_resched();
@@ -4111,18 +2479,7 @@ long __sched io_schedule_timeout(long timeout)
  */
 asmlinkage long sys_sched_get_priority_max(int policy)
 {
-	int ret = -EINVAL;
-
-	switch (policy) {
-	case SCHED_FIFO:
-	case SCHED_RR:
-		ret = MAX_USER_RT_PRIO-1;
-		break;
-	case SCHED_NORMAL:
-		ret = 0;
-		break;
-	}
-	return ret;
+	return 0;
 }
 
 /**
@@ -4176,7 +2533,7 @@ long sys_sched_rr_get_interval(pid_t pid, struct timespec __user *interval)
 		goto out_unlock;
 
 	jiffies_to_timespec(p->policy & SCHED_FIFO ?
-				0 : task_timeslice(p), &t);
+				0 : DEF_TIMESLICE, &t);
 	read_unlock(&tasklist_lock);
 	retval = copy_to_user(interval, &t, sizeof(t)) ? -EFAULT : 0;
 out_nounlock:
@@ -4298,17 +2655,13 @@ void __devinit init_idle(task_t *idle, int cpu)
 	unsigned long flags;
 
 	idle->sleep_avg = 0;
-	idle->array = NULL;
-	idle->prio = MAX_PRIO;
 	idle->state = TASK_RUNNING;
 	idle->cpus_allowed = cpumask_of_cpu(cpu);
 	set_task_cpu(idle, cpu);
-
+	idle->grupo = init_grupo(0);
+	idle->usuario = init_usuario(0);
 	spin_lock_irqsave(&rq->lock, flags);
 	rq->curr = rq->idle = idle;
-#if defined(CONFIG_SMP) && defined(__ARCH_WANT_UNLOCKED_CTXSW)
-	idle->oncpu = 1;
-#endif
 	spin_unlock_irqrestore(&rq->lock, flags);
 
 	/* Set the preempt count _outside_ the spinlocks! */
@@ -4328,1167 +2681,9 @@ void __devinit init_idle(task_t *idle, int cpu)
  */
 cpumask_t nohz_cpu_mask = CPU_MASK_NONE;
 
-#ifdef CONFIG_SMP
-/*
- * This is how migration works:
- *
- * 1) we queue a migration_req_t structure in the source CPU's
- *    runqueue and wake up that CPU's migration thread.
- * 2) we down() the locked semaphore => thread blocks.
- * 3) migration thread wakes up (implicitly it forces the migrated
- *    thread off the CPU)
- * 4) it gets the migration request and checks whether the migrated
- *    task is still in the wrong runqueue.
- * 5) if it's in the wrong runqueue then the migration thread removes
- *    it and puts it into the right queue.
- * 6) migration thread up()s the semaphore.
- * 7) we wake up and the migration is done.
- */
-
-/*
- * Change a given task's CPU affinity. Migrate the thread to a
- * proper CPU and schedule it away if the CPU it's executing on
- * is removed from the allowed bitmask.
- *
- * NOTE: the caller must have a valid reference to the task, the
- * task must not exit() & deallocate itself prematurely.  The
- * call is not atomic; no spinlocks may be held.
- */
-int set_cpus_allowed(task_t *p, cpumask_t new_mask)
-{
-	unsigned long flags;
-	int ret = 0;
-	migration_req_t req;
-	runqueue_t *rq;
-
-	rq = task_rq_lock(p, &flags);
-	if (!cpus_intersects(new_mask, cpu_online_map)) {
-		ret = -EINVAL;
-		goto out;
-	}
-
-	p->cpus_allowed = new_mask;
-	/* Can the task run on the task's current CPU? If so, we're done */
-	if (cpu_isset(task_cpu(p), new_mask))
-		goto out;
-
-	if (migrate_task(p, any_online_cpu(new_mask), &req)) {
-		/* Need help from migration thread: drop lock and wait. */
-		task_rq_unlock(rq, &flags);
-		wake_up_process(rq->migration_thread);
-		wait_for_completion(&req.done);
-		tlb_migrate_finish(p->mm);
-		return 0;
-	}
-out:
-	task_rq_unlock(rq, &flags);
-	return ret;
-}
-
-EXPORT_SYMBOL_GPL(set_cpus_allowed);
-
-/*
- * Move (not current) task off this cpu, onto dest cpu.  We're doing
- * this because either it can't run here any more (set_cpus_allowed()
- * away from this CPU, or CPU going down), or because we're
- * attempting to rebalance this task on exec (sched_exec).
- *
- * So we race with normal scheduler movements, but that's OK, as long
- * as the task is no longer on this CPU.
- */
-static void __migrate_task(struct task_struct *p, int src_cpu, int dest_cpu)
-{
-	runqueue_t *rq_dest, *rq_src;
-
-	if (unlikely(cpu_is_offline(dest_cpu)))
-		return;
-
-	rq_src = cpu_rq(src_cpu);
-	rq_dest = cpu_rq(dest_cpu);
-
-	double_rq_lock(rq_src, rq_dest);
-	/* Already moved. */
-	if (task_cpu(p) != src_cpu)
-		goto out;
-	/* Affinity changed (again). */
-	if (!cpu_isset(dest_cpu, p->cpus_allowed))
-		goto out;
-
-	set_task_cpu(p, dest_cpu);
-	if (p->array) {
-		/*
-		 * Sync timestamp with rq_dest's before activating.
-		 * The same thing could be achieved by doing this step
-		 * afterwards, and pretending it was a local activate.
-		 * This way is cleaner and logically correct.
-		 */
-		p->timestamp = p->timestamp - rq_src->timestamp_last_tick
-				+ rq_dest->timestamp_last_tick;
-		deactivate_task(p, rq_src);
-		activate_task(p, rq_dest, 0);
-		if (TASK_PREEMPTS_CURR(p, rq_dest))
-			resched_task(rq_dest->curr);
-	}
-
-out:
-	double_rq_unlock(rq_src, rq_dest);
-}
-
-/*
- * migration_thread - this is a highprio system thread that performs
- * thread migration by bumping thread off CPU then 'pushing' onto
- * another runqueue.
- */
-static int migration_thread(void *data)
-{
-	runqueue_t *rq;
-	int cpu = (long)data;
-
-	rq = cpu_rq(cpu);
-	BUG_ON(rq->migration_thread != current);
-
-	set_current_state(TASK_INTERRUPTIBLE);
-	while (!kthread_should_stop()) {
-		struct list_head *head;
-		migration_req_t *req;
-
-		try_to_freeze();
-
-		spin_lock_irq(&rq->lock);
-
-		if (cpu_is_offline(cpu)) {
-			spin_unlock_irq(&rq->lock);
-			goto wait_to_die;
-		}
-
-		if (rq->active_balance) {
-			active_load_balance(rq, cpu);
-			rq->active_balance = 0;
-		}
-
-		head = &rq->migration_queue;
-
-		if (list_empty(head)) {
-			spin_unlock_irq(&rq->lock);
-			schedule();
-			set_current_state(TASK_INTERRUPTIBLE);
-			continue;
-		}
-		req = list_entry(head->next, migration_req_t, list);
-		list_del_init(head->next);
-
-		spin_unlock(&rq->lock);
-		__migrate_task(req->task, cpu, req->dest_cpu);
-		local_irq_enable();
-
-		complete(&req->done);
-	}
-	__set_current_state(TASK_RUNNING);
-	return 0;
-
-wait_to_die:
-	/* Wait for kthread_stop */
-	set_current_state(TASK_INTERRUPTIBLE);
-	while (!kthread_should_stop()) {
-		schedule();
-		set_current_state(TASK_INTERRUPTIBLE);
-	}
-	__set_current_state(TASK_RUNNING);
-	return 0;
-}
-
-#ifdef CONFIG_HOTPLUG_CPU
-/* Figure out where task on dead CPU should go, use force if neccessary. */
-static void move_task_off_dead_cpu(int dead_cpu, struct task_struct *tsk)
-{
-	int dest_cpu;
-	cpumask_t mask;
-
-	/* On same node? */
-	mask = node_to_cpumask(cpu_to_node(dead_cpu));
-	cpus_and(mask, mask, tsk->cpus_allowed);
-	dest_cpu = any_online_cpu(mask);
-
-	/* On any allowed CPU? */
-	if (dest_cpu == NR_CPUS)
-		dest_cpu = any_online_cpu(tsk->cpus_allowed);
-
-	/* No more Mr. Nice Guy. */
-	if (dest_cpu == NR_CPUS) {
-		cpus_setall(tsk->cpus_allowed);
-		dest_cpu = any_online_cpu(tsk->cpus_allowed);
-
-		/*
-		 * Don't tell them about moving exiting tasks or
-		 * kernel threads (both mm NULL), since they never
-		 * leave kernel.
-		 */
-		if (tsk->mm && printk_ratelimit())
-			printk(KERN_INFO "process %d (%s) no "
-			       "longer affine to cpu%d\n",
-			       tsk->pid, tsk->comm, dead_cpu);
-	}
-	__migrate_task(tsk, dead_cpu, dest_cpu);
-}
-
-/*
- * While a dead CPU has no uninterruptible tasks queued at this point,
- * it might still have a nonzero ->nr_uninterruptible counter, because
- * for performance reasons the counter is not stricly tracking tasks to
- * their home CPUs. So we just add the counter to another CPU's counter,
- * to keep the global sum constant after CPU-down:
- */
-static void migrate_nr_uninterruptible(runqueue_t *rq_src)
-{
-	runqueue_t *rq_dest = cpu_rq(any_online_cpu(CPU_MASK_ALL));
-	unsigned long flags;
-
-	local_irq_save(flags);
-	double_rq_lock(rq_src, rq_dest);
-	rq_dest->nr_uninterruptible += rq_src->nr_uninterruptible;
-	rq_src->nr_uninterruptible = 0;
-	double_rq_unlock(rq_src, rq_dest);
-	local_irq_restore(flags);
-}
-
-/* Run through task list and migrate tasks from the dead cpu. */
-static void migrate_live_tasks(int src_cpu)
-{
-	struct task_struct *tsk, *t;
-
-	write_lock_irq(&tasklist_lock);
-
-	do_each_thread(t, tsk) {
-		if (tsk == current)
-			continue;
-
-		if (task_cpu(tsk) == src_cpu)
-			move_task_off_dead_cpu(src_cpu, tsk);
-	} while_each_thread(t, tsk);
-
-	write_unlock_irq(&tasklist_lock);
-}
-
-/* Schedules idle task to be the next runnable task on current CPU.
- * It does so by boosting its priority to highest possible and adding it to
- * the _front_ of runqueue. Used by CPU offline code.
- */
-void sched_idle_next(void)
-{
-	int cpu = smp_processor_id();
-	runqueue_t *rq = this_rq();
-	struct task_struct *p = rq->idle;
-	unsigned long flags;
-
-	/* cpu has to be offline */
-	BUG_ON(cpu_online(cpu));
-
-	/* Strictly not necessary since rest of the CPUs are stopped by now
-	 * and interrupts disabled on current cpu.
-	 */
-	spin_lock_irqsave(&rq->lock, flags);
-
-	__setscheduler(p, SCHED_FIFO, MAX_RT_PRIO-1);
-	/* Add idle task to _front_ of it's priority queue */
-	__activate_idle_task(p, rq);
-
-	spin_unlock_irqrestore(&rq->lock, flags);
-}
-
-/* Ensures that the idle task is using init_mm right before its cpu goes
- * offline.
- */
-void idle_task_exit(void)
-{
-	struct mm_struct *mm = current->active_mm;
-
-	BUG_ON(cpu_online(smp_processor_id()));
-
-	if (mm != &init_mm)
-		switch_mm(mm, &init_mm, current);
-	mmdrop(mm);
-}
-
-static void migrate_dead(unsigned int dead_cpu, task_t *tsk)
-{
-	struct runqueue *rq = cpu_rq(dead_cpu);
-
-	/* Must be exiting, otherwise would be on tasklist. */
-	BUG_ON(tsk->exit_state != EXIT_ZOMBIE && tsk->exit_state != EXIT_DEAD);
-
-	/* Cannot have done final schedule yet: would have vanished. */
-	BUG_ON(tsk->flags & PF_DEAD);
-
-	get_task_struct(tsk);
-
-	/*
-	 * Drop lock around migration; if someone else moves it,
-	 * that's OK.  No task can be added to this CPU, so iteration is
-	 * fine.
-	 */
-	spin_unlock_irq(&rq->lock);
-	move_task_off_dead_cpu(dead_cpu, tsk);
-	spin_lock_irq(&rq->lock);
-
-	put_task_struct(tsk);
-}
-
-/* release_task() removes task from tasklist, so we won't find dead tasks. */
-static void migrate_dead_tasks(unsigned int dead_cpu)
-{
-	unsigned arr, i;
-	struct runqueue *rq = cpu_rq(dead_cpu);
-
-	for (arr = 0; arr < 2; arr++) {
-		for (i = 0; i < MAX_PRIO; i++) {
-			struct list_head *list = &rq->arrays[arr].queue[i];
-			while (!list_empty(list))
-				migrate_dead(dead_cpu,
-					     list_entry(list->next, task_t,
-							run_list));
-		}
-	}
-}
-#endif /* CONFIG_HOTPLUG_CPU */
-
-/*
- * migration_call - callback that gets triggered when a CPU is added.
- * Here we can start up the necessary migration thread for the new CPU.
- */
-static int migration_call(struct notifier_block *nfb, unsigned long action,
-			  void *hcpu)
-{
-	int cpu = (long)hcpu;
-	struct task_struct *p;
-	struct runqueue *rq;
-	unsigned long flags;
-
-	switch (action) {
-	case CPU_UP_PREPARE:
-		p = kthread_create(migration_thread, hcpu, "migration/%d",cpu);
-		if (IS_ERR(p))
-			return NOTIFY_BAD;
-		p->flags |= PF_NOFREEZE;
-		kthread_bind(p, cpu);
-		/* Must be high prio: stop_machine expects to yield to it. */
-		rq = task_rq_lock(p, &flags);
-		__setscheduler(p, SCHED_FIFO, MAX_RT_PRIO-1);
-		task_rq_unlock(rq, &flags);
-		cpu_rq(cpu)->migration_thread = p;
-		break;
-	case CPU_ONLINE:
-		/* Strictly unneccessary, as first user will wake it. */
-		wake_up_process(cpu_rq(cpu)->migration_thread);
-		break;
-#ifdef CONFIG_HOTPLUG_CPU
-	case CPU_UP_CANCELED:
-		/* Unbind it from offline cpu so it can run.  Fall thru. */
-		kthread_bind(cpu_rq(cpu)->migration_thread,smp_processor_id());
-		kthread_stop(cpu_rq(cpu)->migration_thread);
-		cpu_rq(cpu)->migration_thread = NULL;
-		break;
-	case CPU_DEAD:
-		migrate_live_tasks(cpu);
-		rq = cpu_rq(cpu);
-		kthread_stop(rq->migration_thread);
-		rq->migration_thread = NULL;
-		/* Idle task back to normal (off runqueue, low prio) */
-		rq = task_rq_lock(rq->idle, &flags);
-		deactivate_task(rq->idle, rq);
-		rq->idle->static_prio = MAX_PRIO;
-		__setscheduler(rq->idle, SCHED_NORMAL, 0);
-		migrate_dead_tasks(cpu);
-		task_rq_unlock(rq, &flags);
-		migrate_nr_uninterruptible(rq);
-		BUG_ON(rq->nr_running != 0);
-
-		/* No need to migrate the tasks: it was best-effort if
-		 * they didn't do lock_cpu_hotplug().  Just wake up
-		 * the requestors. */
-		spin_lock_irq(&rq->lock);
-		while (!list_empty(&rq->migration_queue)) {
-			migration_req_t *req;
-			req = list_entry(rq->migration_queue.next,
-					 migration_req_t, list);
-			list_del_init(&req->list);
-			complete(&req->done);
-		}
-		spin_unlock_irq(&rq->lock);
-		break;
-#endif
-	}
-	return NOTIFY_OK;
-}
-
-/* Register at highest priority so that task migration (migrate_all_tasks)
- * happens before everything else.
- */
-static struct notifier_block __devinitdata migration_notifier = {
-	.notifier_call = migration_call,
-	.priority = 10
-};
-
-int __init migration_init(void)
-{
-	void *cpu = (void *)(long)smp_processor_id();
-	/* Start one for boot CPU. */
-	migration_call(&migration_notifier, CPU_UP_PREPARE, cpu);
-	migration_call(&migration_notifier, CPU_ONLINE, cpu);
-	register_cpu_notifier(&migration_notifier);
-	return 0;
-}
-#endif
-
-#ifdef CONFIG_SMP
-#undef SCHED_DOMAIN_DEBUG
-#ifdef SCHED_DOMAIN_DEBUG
-static void sched_domain_debug(struct sched_domain *sd, int cpu)
-{
-	int level = 0;
-
-	if (!sd) {
-		printk(KERN_DEBUG "CPU%d attaching NULL sched-domain.\n", cpu);
-		return;
-	}
-
-	printk(KERN_DEBUG "CPU%d attaching sched-domain:\n", cpu);
-
-	do {
-		int i;
-		char str[NR_CPUS];
-		struct sched_group *group = sd->groups;
-		cpumask_t groupmask;
-
-		cpumask_scnprintf(str, NR_CPUS, sd->span);
-		cpus_clear(groupmask);
-
-		printk(KERN_DEBUG);
-		for (i = 0; i < level + 1; i++)
-			printk(" ");
-		printk("domain %d: ", level);
-
-		if (!(sd->flags & SD_LOAD_BALANCE)) {
-			printk("does not load-balance\n");
-			if (sd->parent)
-				printk(KERN_ERR "ERROR: !SD_LOAD_BALANCE domain has parent");
-			break;
-		}
-
-		printk("span %s\n", str);
-
-		if (!cpu_isset(cpu, sd->span))
-			printk(KERN_ERR "ERROR: domain->span does not contain CPU%d\n", cpu);
-		if (!cpu_isset(cpu, group->cpumask))
-			printk(KERN_ERR "ERROR: domain->groups does not contain CPU%d\n", cpu);
-
-		printk(KERN_DEBUG);
-		for (i = 0; i < level + 2; i++)
-			printk(" ");
-		printk("groups:");
-		do {
-			if (!group) {
-				printk("\n");
-				printk(KERN_ERR "ERROR: group is NULL\n");
-				break;
-			}
-
-			if (!group->cpu_power) {
-				printk("\n");
-				printk(KERN_ERR "ERROR: domain->cpu_power not set\n");
-			}
-
-			if (!cpus_weight(group->cpumask)) {
-				printk("\n");
-				printk(KERN_ERR "ERROR: empty group\n");
-			}
-
-			if (cpus_intersects(groupmask, group->cpumask)) {
-				printk("\n");
-				printk(KERN_ERR "ERROR: repeated CPUs\n");
-			}
-
-			cpus_or(groupmask, groupmask, group->cpumask);
-
-			cpumask_scnprintf(str, NR_CPUS, group->cpumask);
-			printk(" %s", str);
-
-			group = group->next;
-		} while (group != sd->groups);
-		printk("\n");
-
-		if (!cpus_equal(sd->span, groupmask))
-			printk(KERN_ERR "ERROR: groups don't span domain->span\n");
-
-		level++;
-		sd = sd->parent;
-
-		if (sd) {
-			if (!cpus_subset(groupmask, sd->span))
-				printk(KERN_ERR "ERROR: parent span is not a superset of domain->span\n");
-		}
-
-	} while (sd);
-}
-#else
-#define sched_domain_debug(sd, cpu) {}
-#endif
-
-static int sd_degenerate(struct sched_domain *sd)
-{
-	if (cpus_weight(sd->span) == 1)
-		return 1;
-
-	/* Following flags need at least 2 groups */
-	if (sd->flags & (SD_LOAD_BALANCE |
-			 SD_BALANCE_NEWIDLE |
-			 SD_BALANCE_FORK |
-			 SD_BALANCE_EXEC)) {
-		if (sd->groups != sd->groups->next)
-			return 0;
-	}
-
-	/* Following flags don't use groups */
-	if (sd->flags & (SD_WAKE_IDLE |
-			 SD_WAKE_AFFINE |
-			 SD_WAKE_BALANCE))
-		return 0;
-
-	return 1;
-}
-
-static int sd_parent_degenerate(struct sched_domain *sd,
-						struct sched_domain *parent)
-{
-	unsigned long cflags = sd->flags, pflags = parent->flags;
-
-	if (sd_degenerate(parent))
-		return 1;
-
-	if (!cpus_equal(sd->span, parent->span))
-		return 0;
-
-	/* Does parent contain flags not in child? */
-	/* WAKE_BALANCE is a subset of WAKE_AFFINE */
-	if (cflags & SD_WAKE_AFFINE)
-		pflags &= ~SD_WAKE_BALANCE;
-	/* Flags needing groups don't count if only 1 group in parent */
-	if (parent->groups == parent->groups->next) {
-		pflags &= ~(SD_LOAD_BALANCE |
-				SD_BALANCE_NEWIDLE |
-				SD_BALANCE_FORK |
-				SD_BALANCE_EXEC);
-	}
-	if (~cflags & pflags)
-		return 0;
-
-	return 1;
-}
-
-/*
- * Attach the domain 'sd' to 'cpu' as its base domain.  Callers must
- * hold the hotplug lock.
- */
-static void cpu_attach_domain(struct sched_domain *sd, int cpu)
-{
-	runqueue_t *rq = cpu_rq(cpu);
-	struct sched_domain *tmp;
-
-	/* Remove the sched domains which do not contribute to scheduling. */
-	for (tmp = sd; tmp; tmp = tmp->parent) {
-		struct sched_domain *parent = tmp->parent;
-		if (!parent)
-			break;
-		if (sd_parent_degenerate(tmp, parent))
-			tmp->parent = parent->parent;
-	}
-
-	if (sd && sd_degenerate(sd))
-		sd = sd->parent;
-
-	sched_domain_debug(sd, cpu);
-
-	rcu_assign_pointer(rq->sd, sd);
-}
-
-/* cpus with isolated domains */
-static cpumask_t __devinitdata cpu_isolated_map = CPU_MASK_NONE;
-
-/* Setup the mask of cpus configured for isolated domains */
-static int __init isolated_cpu_setup(char *str)
-{
-	int ints[NR_CPUS], i;
-
-	str = get_options(str, ARRAY_SIZE(ints), ints);
-	cpus_clear(cpu_isolated_map);
-	for (i = 1; i <= ints[0]; i++)
-		if (ints[i] < NR_CPUS)
-			cpu_set(ints[i], cpu_isolated_map);
-	return 1;
-}
-
-__setup ("isolcpus=", isolated_cpu_setup);
-
-/*
- * init_sched_build_groups takes an array of groups, the cpumask we wish
- * to span, and a pointer to a function which identifies what group a CPU
- * belongs to. The return value of group_fn must be a valid index into the
- * groups[] array, and must be >= 0 and < NR_CPUS (due to the fact that we
- * keep track of groups covered with a cpumask_t).
- *
- * init_sched_build_groups will build a circular linked list of the groups
- * covered by the given span, and will set each group's ->cpumask correctly,
- * and ->cpu_power to 0.
- */
-static void init_sched_build_groups(struct sched_group groups[], cpumask_t span,
-				    int (*group_fn)(int cpu))
-{
-	struct sched_group *first = NULL, *last = NULL;
-	cpumask_t covered = CPU_MASK_NONE;
-	int i;
-
-	for_each_cpu_mask(i, span) {
-		int group = group_fn(i);
-		struct sched_group *sg = &groups[group];
-		int j;
-
-		if (cpu_isset(i, covered))
-			continue;
-
-		sg->cpumask = CPU_MASK_NONE;
-		sg->cpu_power = 0;
-
-		for_each_cpu_mask(j, span) {
-			if (group_fn(j) != group)
-				continue;
-
-			cpu_set(j, covered);
-			cpu_set(j, sg->cpumask);
-		}
-		if (!first)
-			first = sg;
-		if (last)
-			last->next = sg;
-		last = sg;
-	}
-	last->next = first;
-}
-
-#define SD_NODES_PER_DOMAIN 16
-
-#ifdef CONFIG_NUMA
-/**
- * find_next_best_node - find the next node to include in a sched_domain
- * @node: node whose sched_domain we're building
- * @used_nodes: nodes already in the sched_domain
- *
- * Find the next node to include in a given scheduling domain.  Simply
- * finds the closest node not already in the @used_nodes map.
- *
- * Should use nodemask_t.
- */
-static int find_next_best_node(int node, unsigned long *used_nodes)
-{
-	int i, n, val, min_val, best_node = 0;
-
-	min_val = INT_MAX;
-
-	for (i = 0; i < MAX_NUMNODES; i++) {
-		/* Start at @node */
-		n = (node + i) % MAX_NUMNODES;
-
-		if (!nr_cpus_node(n))
-			continue;
-
-		/* Skip already used nodes */
-		if (test_bit(n, used_nodes))
-			continue;
-
-		/* Simple min distance search */
-		val = node_distance(node, n);
-
-		if (val < min_val) {
-			min_val = val;
-			best_node = n;
-		}
-	}
-
-	set_bit(best_node, used_nodes);
-	return best_node;
-}
-
-/**
- * sched_domain_node_span - get a cpumask for a node's sched_domain
- * @node: node whose cpumask we're constructing
- * @size: number of nodes to include in this span
- *
- * Given a node, construct a good cpumask for its sched_domain to span.  It
- * should be one that prevents unnecessary balancing, but also spreads tasks
- * out optimally.
- */
-static cpumask_t sched_domain_node_span(int node)
-{
-	int i;
-	cpumask_t span, nodemask;
-	DECLARE_BITMAP(used_nodes, MAX_NUMNODES);
-
-	cpus_clear(span);
-	bitmap_zero(used_nodes, MAX_NUMNODES);
-
-	nodemask = node_to_cpumask(node);
-	cpus_or(span, span, nodemask);
-	set_bit(node, used_nodes);
-
-	for (i = 1; i < SD_NODES_PER_DOMAIN; i++) {
-		int next_node = find_next_best_node(node, used_nodes);
-		nodemask = node_to_cpumask(next_node);
-		cpus_or(span, span, nodemask);
-	}
-
-	return span;
-}
-#endif
-
-/*
- * At the moment, CONFIG_SCHED_SMT is never defined, but leave it in so we
- * can switch it on easily if needed.
- */
-#ifdef CONFIG_SCHED_SMT
-static DEFINE_PER_CPU(struct sched_domain, cpu_domains);
-static struct sched_group sched_group_cpus[NR_CPUS];
-static int cpu_to_cpu_group(int cpu)
-{
-	return cpu;
-}
-#endif
-
-static DEFINE_PER_CPU(struct sched_domain, phys_domains);
-static struct sched_group sched_group_phys[NR_CPUS];
-static int cpu_to_phys_group(int cpu)
-{
-#ifdef CONFIG_SCHED_SMT
-	return first_cpu(cpu_sibling_map[cpu]);
-#else
-	return cpu;
-#endif
-}
-
-#ifdef CONFIG_NUMA
-/*
- * The init_sched_build_groups can't handle what we want to do with node
- * groups, so roll our own. Now each node has its own list of groups which
- * gets dynamically allocated.
- */
-static DEFINE_PER_CPU(struct sched_domain, node_domains);
-static struct sched_group **sched_group_nodes_bycpu[NR_CPUS];
-
-static DEFINE_PER_CPU(struct sched_domain, allnodes_domains);
-static struct sched_group *sched_group_allnodes_bycpu[NR_CPUS];
-
-static int cpu_to_allnodes_group(int cpu)
-{
-	return cpu_to_node(cpu);
-}
-#endif
-
-/*
- * Build sched domains for a given set of cpus and attach the sched domains
- * to the individual cpus
- */
-void build_sched_domains(const cpumask_t *cpu_map)
-{
-	int i;
-#ifdef CONFIG_NUMA
-	struct sched_group **sched_group_nodes = NULL;
-	struct sched_group *sched_group_allnodes = NULL;
-
-	/*
-	 * Allocate the per-node list of sched groups
-	 */
-	sched_group_nodes = kmalloc(sizeof(struct sched_group*)*MAX_NUMNODES,
-					   GFP_ATOMIC);
-	if (!sched_group_nodes) {
-		printk(KERN_WARNING "Can not alloc sched group node list\n");
-		return;
-	}
-	sched_group_nodes_bycpu[first_cpu(*cpu_map)] = sched_group_nodes;
-#endif
-
-	/*
-	 * Set up domains for cpus specified by the cpu_map.
-	 */
-	for_each_cpu_mask(i, *cpu_map) {
-		int group;
-		struct sched_domain *sd = NULL, *p;
-		cpumask_t nodemask = node_to_cpumask(cpu_to_node(i));
-
-		cpus_and(nodemask, nodemask, *cpu_map);
-
-#ifdef CONFIG_NUMA
-		if (cpus_weight(*cpu_map)
-				> SD_NODES_PER_DOMAIN*cpus_weight(nodemask)) {
-			if (!sched_group_allnodes) {
-				sched_group_allnodes
-					= kmalloc(sizeof(struct sched_group)
-							* MAX_NUMNODES,
-						  GFP_KERNEL);
-				if (!sched_group_allnodes) {
-					printk(KERN_WARNING
-					"Can not alloc allnodes sched group\n");
-					break;
-				}
-				sched_group_allnodes_bycpu[i]
-						= sched_group_allnodes;
-			}
-			sd = &per_cpu(allnodes_domains, i);
-			*sd = SD_ALLNODES_INIT;
-			sd->span = *cpu_map;
-			group = cpu_to_allnodes_group(i);
-			sd->groups = &sched_group_allnodes[group];
-			p = sd;
-		} else
-			p = NULL;
-
-		sd = &per_cpu(node_domains, i);
-		*sd = SD_NODE_INIT;
-		sd->span = sched_domain_node_span(cpu_to_node(i));
-		sd->parent = p;
-		cpus_and(sd->span, sd->span, *cpu_map);
-#endif
-
-		p = sd;
-		sd = &per_cpu(phys_domains, i);
-		group = cpu_to_phys_group(i);
-		*sd = SD_CPU_INIT;
-		sd->span = nodemask;
-		sd->parent = p;
-		sd->groups = &sched_group_phys[group];
-
-#ifdef CONFIG_SCHED_SMT
-		p = sd;
-		sd = &per_cpu(cpu_domains, i);
-		group = cpu_to_cpu_group(i);
-		*sd = SD_SIBLING_INIT;
-		sd->span = cpu_sibling_map[i];
-		cpus_and(sd->span, sd->span, *cpu_map);
-		sd->parent = p;
-		sd->groups = &sched_group_cpus[group];
-#endif
-	}
-
-#ifdef CONFIG_SCHED_SMT
-	/* Set up CPU (sibling) groups */
-	for_each_cpu_mask(i, *cpu_map) {
-		cpumask_t this_sibling_map = cpu_sibling_map[i];
-		cpus_and(this_sibling_map, this_sibling_map, *cpu_map);
-		if (i != first_cpu(this_sibling_map))
-			continue;
-
-		init_sched_build_groups(sched_group_cpus, this_sibling_map,
-						&cpu_to_cpu_group);
-	}
-#endif
-
-	/* Set up physical groups */
-	for (i = 0; i < MAX_NUMNODES; i++) {
-		cpumask_t nodemask = node_to_cpumask(i);
-
-		cpus_and(nodemask, nodemask, *cpu_map);
-		if (cpus_empty(nodemask))
-			continue;
-
-		init_sched_build_groups(sched_group_phys, nodemask,
-						&cpu_to_phys_group);
-	}
-
-#ifdef CONFIG_NUMA
-	/* Set up node groups */
-	if (sched_group_allnodes)
-		init_sched_build_groups(sched_group_allnodes, *cpu_map,
-					&cpu_to_allnodes_group);
-
-	for (i = 0; i < MAX_NUMNODES; i++) {
-		/* Set up node groups */
-		struct sched_group *sg, *prev;
-		cpumask_t nodemask = node_to_cpumask(i);
-		cpumask_t domainspan;
-		cpumask_t covered = CPU_MASK_NONE;
-		int j;
-
-		cpus_and(nodemask, nodemask, *cpu_map);
-		if (cpus_empty(nodemask)) {
-			sched_group_nodes[i] = NULL;
-			continue;
-		}
-
-		domainspan = sched_domain_node_span(i);
-		cpus_and(domainspan, domainspan, *cpu_map);
-
-		sg = kmalloc(sizeof(struct sched_group), GFP_KERNEL);
-		sched_group_nodes[i] = sg;
-		for_each_cpu_mask(j, nodemask) {
-			struct sched_domain *sd;
-			sd = &per_cpu(node_domains, j);
-			sd->groups = sg;
-			if (sd->groups == NULL) {
-				/* Turn off balancing if we have no groups */
-				sd->flags = 0;
-			}
-		}
-		if (!sg) {
-			printk(KERN_WARNING
-			"Can not alloc domain group for node %d\n", i);
-			continue;
-		}
-		sg->cpu_power = 0;
-		sg->cpumask = nodemask;
-		cpus_or(covered, covered, nodemask);
-		prev = sg;
-
-		for (j = 0; j < MAX_NUMNODES; j++) {
-			cpumask_t tmp, notcovered;
-			int n = (i + j) % MAX_NUMNODES;
-
-			cpus_complement(notcovered, covered);
-			cpus_and(tmp, notcovered, *cpu_map);
-			cpus_and(tmp, tmp, domainspan);
-			if (cpus_empty(tmp))
-				break;
-
-			nodemask = node_to_cpumask(n);
-			cpus_and(tmp, tmp, nodemask);
-			if (cpus_empty(tmp))
-				continue;
-
-			sg = kmalloc(sizeof(struct sched_group), GFP_KERNEL);
-			if (!sg) {
-				printk(KERN_WARNING
-				"Can not alloc domain group for node %d\n", j);
-				break;
-			}
-			sg->cpu_power = 0;
-			sg->cpumask = tmp;
-			cpus_or(covered, covered, tmp);
-			prev->next = sg;
-			prev = sg;
-		}
-		prev->next = sched_group_nodes[i];
-	}
-#endif
-
-	/* Calculate CPU power for physical packages and nodes */
-	for_each_cpu_mask(i, *cpu_map) {
-		int power;
-		struct sched_domain *sd;
-#ifdef CONFIG_SCHED_SMT
-		sd = &per_cpu(cpu_domains, i);
-		power = SCHED_LOAD_SCALE;
-		sd->groups->cpu_power = power;
-#endif
-
-		sd = &per_cpu(phys_domains, i);
-		power = SCHED_LOAD_SCALE + SCHED_LOAD_SCALE *
-				(cpus_weight(sd->groups->cpumask)-1) / 10;
-		sd->groups->cpu_power = power;
-
-#ifdef CONFIG_NUMA
-		sd = &per_cpu(allnodes_domains, i);
-		if (sd->groups) {
-			power = SCHED_LOAD_SCALE + SCHED_LOAD_SCALE *
-				(cpus_weight(sd->groups->cpumask)-1) / 10;
-			sd->groups->cpu_power = power;
-		}
-#endif
-	}
-
-#ifdef CONFIG_NUMA
-	for (i = 0; i < MAX_NUMNODES; i++) {
-		struct sched_group *sg = sched_group_nodes[i];
-		int j;
-
-		if (sg == NULL)
-			continue;
-next_sg:
-		for_each_cpu_mask(j, sg->cpumask) {
-			struct sched_domain *sd;
-			int power;
-
-			sd = &per_cpu(phys_domains, j);
-			if (j != first_cpu(sd->groups->cpumask)) {
-				/*
-				 * Only add "power" once for each
-				 * physical package.
-				 */
-				continue;
-			}
-			power = SCHED_LOAD_SCALE + SCHED_LOAD_SCALE *
-				(cpus_weight(sd->groups->cpumask)-1) / 10;
-
-			sg->cpu_power += power;
-		}
-		sg = sg->next;
-		if (sg != sched_group_nodes[i])
-			goto next_sg;
-	}
-#endif
-
-	/* Attach the domains */
-	for_each_cpu_mask(i, *cpu_map) {
-		struct sched_domain *sd;
-#ifdef CONFIG_SCHED_SMT
-		sd = &per_cpu(cpu_domains, i);
-#else
-		sd = &per_cpu(phys_domains, i);
-#endif
-		cpu_attach_domain(sd, i);
-	}
-}
-/*
- * Set up scheduler domains and groups.  Callers must hold the hotplug lock.
- */
-static void arch_init_sched_domains(const cpumask_t *cpu_map)
-{
-	cpumask_t cpu_default_map;
-
-	/*
-	 * Setup mask for cpus without special case scheduling requirements.
-	 * For now this just excludes isolated cpus, but could be used to
-	 * exclude other special cases in the future.
-	 */
-	cpus_andnot(cpu_default_map, *cpu_map, cpu_isolated_map);
-
-	build_sched_domains(&cpu_default_map);
-}
-
-static void arch_destroy_sched_domains(const cpumask_t *cpu_map)
-{
-#ifdef CONFIG_NUMA
-	int i;
-	int cpu;
-
-	for_each_cpu_mask(cpu, *cpu_map) {
-		struct sched_group *sched_group_allnodes
-			= sched_group_allnodes_bycpu[cpu];
-		struct sched_group **sched_group_nodes
-			= sched_group_nodes_bycpu[cpu];
-
-		if (sched_group_allnodes) {
-			kfree(sched_group_allnodes);
-			sched_group_allnodes_bycpu[cpu] = NULL;
-		}
-
-		if (!sched_group_nodes)
-			continue;
-
-		for (i = 0; i < MAX_NUMNODES; i++) {
-			cpumask_t nodemask = node_to_cpumask(i);
-			struct sched_group *oldsg, *sg = sched_group_nodes[i];
-
-			cpus_and(nodemask, nodemask, *cpu_map);
-			if (cpus_empty(nodemask))
-				continue;
-
-			if (sg == NULL)
-				continue;
-			sg = sg->next;
-next_sg:
-			oldsg = sg;
-			sg = sg->next;
-			kfree(oldsg);
-			if (oldsg != sched_group_nodes[i])
-				goto next_sg;
-		}
-		kfree(sched_group_nodes);
-		sched_group_nodes_bycpu[cpu] = NULL;
-	}
-#endif
-}
-
-/*
- * Detach sched domains from a group of cpus specified in cpu_map
- * These cpus will now be attached to the NULL domain
- */
-static inline void detach_destroy_domains(const cpumask_t *cpu_map)
-{
-	int i;
-
-	for_each_cpu_mask(i, *cpu_map)
-		cpu_attach_domain(NULL, i);
-	synchronize_sched();
-	arch_destroy_sched_domains(cpu_map);
-}
-
-/*
- * Partition sched domains as specified by the cpumasks below.
- * This attaches all cpus from the cpumasks to the NULL domain,
- * waits for a RCU quiescent period, recalculates sched
- * domain information and then attaches them back to the
- * correct sched domains
- * Call with hotplug lock held
- */
-void partition_sched_domains(cpumask_t *partition1, cpumask_t *partition2)
-{
-	cpumask_t change_map;
-
-	cpus_and(*partition1, *partition1, cpu_online_map);
-	cpus_and(*partition2, *partition2, cpu_online_map);
-	cpus_or(change_map, *partition1, *partition2);
-
-	/* Detach sched domains from all of the affected cpus */
-	detach_destroy_domains(&change_map);
-	if (!cpus_empty(*partition1))
-		build_sched_domains(partition1);
-	if (!cpus_empty(*partition2))
-		build_sched_domains(partition2);
-}
-
-#ifdef CONFIG_HOTPLUG_CPU
-/*
- * Force a reinitialization of the sched domains hierarchy.  The domains
- * and groups cannot be updated in place without racing with the balancing
- * code, so we temporarily attach all running cpus to the NULL domain
- * which will prevent rebalancing while the sched domains are recalculated.
- */
-static int update_sched_domains(struct notifier_block *nfb,
-				unsigned long action, void *hcpu)
-{
-	switch (action) {
-	case CPU_UP_PREPARE:
-	case CPU_DOWN_PREPARE:
-		detach_destroy_domains(&cpu_online_map);
-		return NOTIFY_OK;
-
-	case CPU_UP_CANCELED:
-	case CPU_DOWN_FAILED:
-	case CPU_ONLINE:
-	case CPU_DEAD:
-		/*
-		 * Fall through and re-initialise the domains.
-		 */
-		break;
-	default:
-		return NOTIFY_DONE;
-	}
-
-	/* The hotplug lock is already held by cpu_up/cpu_down */
-	arch_init_sched_domains(&cpu_online_map);
-
-	return NOTIFY_OK;
-}
-#endif
-
-void __init sched_init_smp(void)
-{
-	lock_cpu_hotplug();
-	arch_init_sched_domains(&cpu_online_map);
-	unlock_cpu_hotplug();
-	/* XXX: Theoretical race here - CPU may be hotplugged now */
-	hotcpu_notifier(update_sched_domains, 0);
-}
-#else
 void __init sched_init_smp(void)
 {
 }
-#endif /* CONFIG_SMP */
 
 int in_sched_functions(unsigned long addr)
 {
@@ -5499,43 +2694,93 @@ int in_sched_functions(unsigned long addr)
 		&& addr < (unsigned long)__sched_text_end);
 }
 
+/* Elimina la estructura grupo, solamente si nadie mas hace referencia a ella */
+
+
+/* Rutina para mover un proceso de un usuario a otro */
+void switch_uid_sched(uid_t nuid)
+{
+	unsigned long flags;
+	runqueue_t *rq;
+	/* Se deshabilita la expropiacion debido a que las estructuras quedan
+           inconsistentes por un momento */
+	rq = task_rq_lock(current,&flags);
+	dequeue_task(current);
+	delete_usuario(current->usuario);
+	current->usuario = init_usuario(nuid);
+	enqueue_task(current);
+	task_rq_unlock(rq, &flags);
+	
+}
+
+EXPORT_SYMBOL(switch_uid_sched);
+
+/* Rutina para mover un proceso de un grupo a otro, y de un usuario de un grupo a otro
+ * Lo segundo se hace debido a que un usuario de un grupo debe ser distinto a un usuario de
+ * otro grupo con el mismo nombre.
+ */
+void switch_gid_sched(void)
+{
+	unsigned long flags;
+	runqueue_t *rq;
+	/* Se deshabilita la expropiacion debido a que las estructuras quedan
+           inconsistentes por un momento */
+	rq = task_rq_lock(current,&flags);
+	dequeue_task(current);
+	delete_usuario(current->usuario);
+	delete_grupo(current->grupo);
+	/* El proceso esta totalmente desconectado, volver a insertarlo
+	   en la nueva ubicacion */
+	current->grupo = (struct grupo_struct *)init_grupo(current->gid);
+	current->usuario = init_usuario(current->uid);
+	enqueue_task(current);
+	task_rq_unlock(rq, &flags);
+}
+
+EXPORT_SYMBOL(switch_gid_sched);
+
+/*
+* Inicializacion del Scheduler de Linux
+* Esta funcion inicializa los valores de la cola de ejecucion, el grupo y usuario incial, y por ultimo la tarea "idle"
+*/
 void __init sched_init(void)
 {
 	runqueue_t *rq;
-	int i, j, k;
+	rq = cpu_rq(0);
+	spin_lock_init(&rq->lock);
+	rq->nr_running = 0;
+	rq->best_expired_prio = 1;
+	atomic_set(&rq->nr_iowait, 0);
+	atomic_set(&rq->grupos, 0);
 
-	for (i = 0; i < NR_CPUS; i++) {
-		prio_array_t *array;
+	rq->grupos_lista = NULL;
 
-		rq = cpu_rq(i);
-		spin_lock_init(&rq->lock);
-		rq->nr_running = 0;
-		rq->active = rq->arrays;
-		rq->expired = rq->arrays + 1;
-		rq->best_expired_prio = MAX_PRIO;
-
-#ifdef CONFIG_SMP
-		rq->sd = NULL;
-		for (j = 1; j < 3; j++)
-			rq->cpu_load[j] = 0;
-		rq->active_balance = 0;
-		rq->push_cpu = 0;
-		rq->migration_thread = NULL;
-		INIT_LIST_HEAD(&rq->migration_queue);
+	/* Inicializacion del Grupo 0 */
+	grupo_root.gid = 0;
+	grupo_root.usuarios_lista = NULL;
+	INIT_LIST_HEAD(&grupo_root.lista);
+	INIT_LIST_HEAD(&grupo_root.lista_completa);
+	atomic_set( &grupo_root.usuarios, 0);
+#ifdef CONFIG_SCHEDSTATS
+	memset(&grupo_root.sched_info, 0, sizeof(grupo_root.sched_info));
 #endif
-		atomic_set(&rq->nr_iowait, 0);
 
-		for (j = 0; j < 2; j++) {
-			array = rq->arrays + j;
-			for (k = 0; k < MAX_PRIO; k++) {
-				INIT_LIST_HEAD(array->queue + k);
-				__clear_bit(k, array->bitmap);
-			}
-			// delimiter for bitsearch
-			__set_bit(MAX_PRIO, array->bitmap);
-		}
-	}
-
+	/* Inicializacion del Usuario 0 */
+	usuario_root.uid = 0;
+	usuario_root.procesos_lista = NULL;
+	INIT_LIST_HEAD(&usuario_root.lista);
+	INIT_LIST_HEAD(&usuario_root.lista_completa);
+	atomic_set(&usuario_root.procesos, 0);
+#ifdef CONFIG_SCHEDSTATS
+	memset(&usuario_root.sched_info, 0, sizeof(usuario_root.sched_info));
+#endif
+	/* Inicializacion del Proceso */
+	init_task.grupo = &grupo_root;
+	atomic_set(&grupo_root.ref,1);
+	atomic_set(&usuario_root.ref,1);
+	init_task.usuario = &usuario_root;
+	grupo_root.usuarios_lista_completa = &usuario_root;
+	
 	/*
 	 * The boot idle thread does lazy MMU switching as well:
 	 */
@@ -5576,74 +2821,5 @@ EXPORT_SYMBOL(__might_sleep);
 #ifdef CONFIG_MAGIC_SYSRQ
 void normalize_rt_tasks(void)
 {
-	struct task_struct *p;
-	prio_array_t *array;
-	unsigned long flags;
-	runqueue_t *rq;
-
-	read_lock_irq(&tasklist_lock);
-	for_each_process (p) {
-		if (!rt_task(p))
-			continue;
-
-		rq = task_rq_lock(p, &flags);
-
-		array = p->array;
-		if (array)
-			deactivate_task(p, task_rq(p));
-		__setscheduler(p, SCHED_NORMAL, 0);
-		if (array) {
-			__activate_task(p, task_rq(p));
-			resched_task(rq->curr);
-		}
-
-		task_rq_unlock(rq, &flags);
-	}
-	read_unlock_irq(&tasklist_lock);
 }
-
 #endif /* CONFIG_MAGIC_SYSRQ */
-
-#ifdef CONFIG_IA64
-/*
- * These functions are only useful for the IA64 MCA handling.
- *
- * They can only be called when the whole system has been
- * stopped - every CPU needs to be quiescent, and no scheduling
- * activity can take place. Using them for anything else would
- * be a serious bug, and as a result, they aren't even visible
- * under any other configuration.
- */
-
-/**
- * curr_task - return the current task for a given cpu.
- * @cpu: the processor in question.
- *
- * ONLY VALID WHEN THE WHOLE SYSTEM IS STOPPED!
- */
-task_t *curr_task(int cpu)
-{
-	return cpu_curr(cpu);
-}
-
-/**
- * set_curr_task - set the current task for a given cpu.
- * @cpu: the processor in question.
- * @p: the task pointer to set.
- *
- * Description: This function must only be used when non-maskable interrupts
- * are serviced on a separate stack.  It allows the architecture to switch the
- * notion of the current task on a cpu in a non-blocking manner.  This function
- * must be called with all CPU's synchronized, and interrupts disabled, the
- * and caller must save the original value of the current task (see
- * curr_task() above) and restore that value before reenabling interrupts and
- * re-starting the system.
- *
- * ONLY VALID WHEN THE WHOLE SYSTEM IS STOPPED!
- */
-void set_curr_task(int cpu, task_t *p)
-{
-	cpu_curr(cpu) = p;
-}
-
-#endif

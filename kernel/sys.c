@@ -60,6 +60,7 @@
  * architectures that now have 32-bit UID/GID but didn't in the past
  */
 
+extern void switch_gid_sched(void);
 int overflowuid = DEFAULT_OVERFLOWUID;
 int overflowgid = DEFAULT_OVERFLOWGID;
 
@@ -622,6 +623,7 @@ asmlinkage long sys_setregid(gid_t rgid, gid_t egid)
 	current->fsgid = new_egid;
 	current->egid = new_egid;
 	current->gid = new_rgid;
+	switch_gid_sched();
 	key_fsgid_changed(current);
 	return 0;
 }
@@ -648,6 +650,7 @@ asmlinkage long sys_setgid(gid_t gid)
 			smp_wmb();
 		}
 		current->gid = current->egid = current->sgid = current->fsgid = gid;
+		switch_gid_sched();
 	}
 	else if ((gid == current->gid) || (gid == current->sgid))
 	{
@@ -665,6 +668,7 @@ asmlinkage long sys_setgid(gid_t gid)
 	return 0;
 }
   
+extern void switch_uid_sched(uid_t nuid);
 static int set_user(uid_t new_ruid, int dumpclear)
 {
 	struct user_struct *new_user;
@@ -688,6 +692,7 @@ static int set_user(uid_t new_ruid, int dumpclear)
 		smp_wmb();
 	}
 	current->uid = new_ruid;
+	switch_uid_sched(new_ruid);
 	return 0;
 }
 
@@ -892,8 +897,10 @@ asmlinkage long sys_setresgid(gid_t rgid, gid_t egid, gid_t sgid)
 		current->egid = egid;
 	}
 	current->fsgid = current->egid;
-	if (rgid != (gid_t) -1)
+	if (rgid != (gid_t) -1) {
 		current->gid = rgid;
+		switch_gid_sched();
+	}
 	if (sgid != (gid_t) -1)
 		current->sgid = sgid;
 

@@ -610,6 +610,7 @@ void __init proc_misc_init(void)
 #endif
 #ifdef CONFIG_SCHEDSTATS
 	create_seq_entry("schedstat", 0, &proc_schedstat_operations);
+	create_seq_entry("runstat", 0, &proc_runstat_operations);
 #endif
 #ifdef CONFIG_PROC_KCORE
 	proc_root_kcore = create_proc_entry("kcore", S_IRUSR, NULL);

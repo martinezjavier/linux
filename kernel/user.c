@@ -148,7 +148,9 @@ struct user_struct * alloc_uid(uid_t uid)
 			up = new;
 		}
 		spin_unlock(&uidhash_lock);
-
+		INIT_LIST_HEAD(&new->lista);
+		new->procesos_lista = NULL;
+		atomic_set(&new->procesos, 0);
 	}
 	return up;
 }

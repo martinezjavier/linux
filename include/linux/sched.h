@@ -445,7 +445,7 @@ struct signal_struct {
 
 #define MAX_PRIO		(MAX_RT_PRIO + 40)
 
-#define rt_task(p)		(unlikely((p)->prio < MAX_RT_PRIO))
+#define rt_task(p)		0
 
 /*
  * Some day this will be a full-fledged user tracking system..
@@ -453,6 +453,7 @@ struct signal_struct {
 struct user_struct {
 	atomic_t __count;	/* reference count */
 	atomic_t processes;	/* How many processes does this user have? */
+	atomic_t procesos;	/* Contador de procesos por usuario */
 	atomic_t files;		/* How many open files does this user have? */
 	atomic_t sigpending;	/* How many pending signals does this user have? */
 #ifdef CONFIG_INOTIFY
@@ -470,6 +471,12 @@ struct user_struct {
 
 	/* Hash table maintenance information */
 	struct list_head uidhash_list;
+
+	/* Lista de usuarios por grupo */
+	struct list_head lista;
+	/* Lista de procesos de este usuario */
+	struct task_struct *procesos_lista;
+
 	uid_t uid;
 };
 
@@ -478,7 +485,6 @@ extern struct user_struct *find_user(uid_t);
 extern struct user_struct root_user;
 #define INIT_USER (&root_user)
 
-typedef struct prio_array prio_array_t;
 struct backing_dev_info;
 struct reclaim_state;
 
@@ -495,6 +501,7 @@ struct sched_info {
 };
 
 extern struct file_operations proc_schedstat_operations;
+extern struct file_operations proc_runstat_operations;
 #endif
 
 enum idle_type
@@ -645,15 +652,13 @@ struct task_struct {
 	atomic_t usage;
 	unsigned long flags;	/* per process flags, defined below */
 	unsigned long ptrace;
-
+	int static_prio;
 	int lock_depth;		/* BKL lock depth */
 
 #if defined(CONFIG_SMP) && defined(__ARCH_WANT_UNLOCKED_CTXSW)
 	int oncpu;
 #endif
-	int prio, static_prio;
 	struct list_head run_list;
-	prio_array_t *array;
 
 	unsigned short ioprio;
 
@@ -730,6 +735,11 @@ struct task_struct {
 	kernel_cap_t   cap_effective, cap_inheritable, cap_permitted;
 	unsigned keep_capabilities:1;
 	struct user_struct *user;
+
+	/* necesario para saber a que grupo pertenece */
+	struct grupo_struct *grupo;
+	/* Usuario*/
+	struct usuario_struct *usuario;
 #ifdef CONFIG_KEYS
 	struct key *thread_keyring;	/* keyring private to this thread */
 	unsigned char jit_keyring;	/* default keyring to attach requested keys to */

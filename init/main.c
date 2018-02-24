@@ -678,7 +678,7 @@ static int init(void * unused)
 
 	fixup_cpu_present_map();
 	smp_init();
-	sched_init_smp();
+	//sched_init_smp();
 
 	cpuset_init_smp();
 
