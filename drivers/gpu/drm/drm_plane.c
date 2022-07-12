@@ -673,6 +673,17 @@ int drm_mode_getplane_res(struct drm_device *dev, void *data,
 		    !file_priv->universal_planes)
 			continue;
 
+		/*
+		 * Unless userspace supports virtual cursor plane
+		 * then if we're running on virtual driver do not
+		 * advertise cursor planes because they'll be broken
+		 */
+		if (plane->type == DRM_PLANE_TYPE_CURSOR &&
+		    drm_core_check_feature(dev, DRIVER_VIRTUAL)	&&
+		    file_priv->atomic &&
+		    !file_priv->supports_virtual_cursor_plane)
+			continue;
+
 		if (drm_lease_held(file_priv, plane->base.id)) {
 			if (count < plane_resp->count_planes &&
 			    put_user(plane->base.id, plane_ptr + count))

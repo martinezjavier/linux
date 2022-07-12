@@ -104,6 +104,16 @@ enum drm_driver_feature {
 	 * acceleration should be handled by two drivers that are connected using auxiliary bus.
 	 */
 	DRIVER_COMPUTE_ACCEL            = BIT(7),
+	/**
+	 * @DRIVER_VIRTUAL:
+	 *
+	 * Driver is running on top of virtual hardware. The most significant
+	 * implication of this is a requirement of special handling of the
+	 * cursor plane (e.g. cursor plane has to actually track the mouse
+	 * cursor and the clients are required to set hotspot in order for
+	 * the cursor planes to work correctly).
+	 */
+	DRIVER_VIRTUAL                  = BIT(8),
 
 	/* IMPORTANT: Below are all the legacy flags, add new ones above. */
 
