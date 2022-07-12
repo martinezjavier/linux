@@ -836,6 +836,23 @@ struct drm_get_cap {
  */
 #define DRM_CLIENT_CAP_WRITEBACK_CONNECTORS	5
 
+/**
+ * DRM_CLIENT_CAP_SUPPORTS_VIRTUAL_CURSOR_PLANE
+ *
+ * If set to 1, the DRM core will expose cursor plane to be used for
+ * virtualized mouse cursor, without virtualized drivers will not expose
+ * the cursor plane in atomic contexts. Cursor planes in virtualized
+ * drivers come with some additional restrictions and are not truly
+ * universal, e.g. they need to act like one would expect from a mouse
+ * cursor and have correctly set hotspot properties.
+ * The client must enable &DRM_CLIENT_CAP_ATOMIC first.
+ *
+ * This capability is always supported for atomic-capable virtualized drivers
+ * starting from kernel version 5.21.
+ */
+#define DRM_CLIENT_CAP_SUPPORTS_VIRTUAL_CURSOR_PLANE	6
+
+
 /* DRM_IOCTL_SET_CLIENT_CAP ioctl argument type */
 struct drm_set_client_cap {
 	__u64 capability;
