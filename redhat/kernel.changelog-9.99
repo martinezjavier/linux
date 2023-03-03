@@ -1,3 +1,8 @@
+* Fri Mar 03 2023 Justin M. Forbes <jforbes@fedoraproject.org> [6.2.2-0]
+- Turn off DEBUG_INFO_COMPRESSED_ZLIB for Fedora (Justin M. Forbes)
+- Linux v6.2.2
+Resolves: 
+
 * Sat Feb 25 2023 Justin M. Forbes <jforbes@fedoraproject.org> [6.2.1-0]
 - Add UKI revert patch to allow builds on F36 and F37 (Justin M. Forbes)
 - Turn E1000 back on (Justin M. Forbes)
