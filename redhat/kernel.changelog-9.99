@@ -1,3 +1,13 @@
+* Tue Mar 07 2023 Justin M. Forbes <jforbes@fedoraproject.org> [6.2.2-1]
+- Bump for rebuild (Justin M. Forbes)
+- iommu/amd: Do not identity map v2 capable device when snp is enabled (Vasant Hegde)
+- iommu: Attach device group to old domain in error path (Vasant Hegde)
+- iommu/amd: Improve page fault error reporting (Vasant Hegde)
+- iommu/amd: Skip attach device domain is same as new domain (Vasant Hegde)
+- iommu/amd: Fix error handling for pdev_pri_ats_enable() (Vasant Hegde)
+- redhat/kernel.spec.template: Fix RHEL systemd-boot-unsigned dependency (Prarit Bhargava)
+Resolves: 
+
 * Fri Mar 03 2023 Justin M. Forbes <jforbes@fedoraproject.org> [6.2.2-0]
 - Turn off DEBUG_INFO_COMPRESSED_ZLIB for Fedora (Justin M. Forbes)
 - Linux v6.2.2
