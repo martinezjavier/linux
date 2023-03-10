@@ -1,3 +1,10 @@
+* Fri Mar 10 2023 Justin M. Forbes <jforbes@fedoraproject.org> [6.2.3-0]
+- Add new config option for 6.2.3 (Justin M. Forbes)
+- Only build the efiuki for F37 and newer (Justin M. Forbes)
+- Reset release (Justin M. Forbes)
+- Linux v6.2.3
+Resolves: 
+
 * Tue Mar 07 2023 Justin M. Forbes <jforbes@fedoraproject.org> [6.2.2-1]
 - Bump for rebuild (Justin M. Forbes)
 - iommu/amd: Do not identity map v2 capable device when snp is enabled (Vasant Hegde)
