@@ -1,3 +1,9 @@
+* Sat Mar 11 2023 Justin M. Forbes <jforbes@fedoraproject.org> [6.2.5-0]
+- Revert "wifi: cfg80211: Fix use after free for wext" (Justin M. Forbes)
+- Fix up buildReqs for UKI (Justin M. Forbes)
+- Linux v6.2.5
+Resolves: 
+
 * Fri Mar 10 2023 Justin M. Forbes <jforbes@fedoraproject.org> [6.2.3-0]
 - Add new config option for 6.2.3 (Justin M. Forbes)
 - Only build the efiuki for F37 and newer (Justin M. Forbes)
