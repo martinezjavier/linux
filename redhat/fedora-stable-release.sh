@@ -20,7 +20,6 @@ for release in $( cat redhat/release_targets );  do
 	38) build=30$releasenum
 	    ;;
 	37) build=20$releasenum
-	    ApplyPatches="1"
 	    ;;
 	36) build=10$releasenum
 	    ApplyPatches="1"
