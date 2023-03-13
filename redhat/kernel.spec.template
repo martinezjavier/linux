@@ -109,9 +109,9 @@ Summary: The Linux kernel
 %ifarch x86_64
 %if 0%{?fedora} > 36
 %global efiuki 1
-%endif
 %else
 %global efiuki 0
+%endif
 %endif
 
 %if %{zipmodules}
