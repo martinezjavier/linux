@@ -22,7 +22,6 @@ for release in $( cat redhat/release_targets );  do
 	37) build=20$releasenum
 	    ;;
 	36) build=10$releasenum
-	    ApplyPatches="1"
 	    ;;
 	esac
 	if [[ $ApplyPatches == "1" ]] ; then
