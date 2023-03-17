@@ -1,3 +1,15 @@
+* Fri Mar 17 2023 Justin M. Forbes <jforbes@fedoraproject.org> [6.2.7-0]
+- NFS: Correct timing for assigning access cache timestamp (Chengen Du)
+- usb: ucsi: Fix ucsi->connector race (Hans de Goede)
+- usb: ucsi_acpi: Increase the command completion timeout (Hans de Goede)
+- usb: ucsi: Fix NULL pointer deref in ucsi_connector_change() (Hans de Goede)
+- Enable CONFIG_NET_SCH_FQ_PIE for Fedora (Justin M. Forbes)
+- Fix build issue with efiuki conditional (Justin M. Forbes)
+- Move endif to correct location for efiuki conditional (Justin M. Forbes)
+- EFI UKI revert now conditionalized in spec. Drop revert (Justin M. Forbes)
+- Linux v6.2.7
+Resolves: 
+
 * Mon Mar 13 2023 Justin M. Forbes <jforbes@fedoraproject.org> [6.2.6-0]
 - Add Fedora 37 and 36 to release targets (Justin M. Forbes)
 - wifi: cfg80211: Fix use after free for wext (Alexander Wetzel)
