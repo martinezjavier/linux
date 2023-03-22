@@ -1,3 +1,9 @@
+* Wed Mar 22 2023 Augusto Caringi <acaringi@redhat.com> [6.2.8-0]
+- Add new config option for 6.2.8 (Augusto Caringi)
+- Revert "usb: xhci-pci: Set PROBE_PREFER_ASYNCHRONOUS" (Kate Hsuan)
+- Linux v6.2.8
+Resolves: 
+
 * Fri Mar 17 2023 Justin M. Forbes <jforbes@fedoraproject.org> [6.2.7-0]
 - NFS: Correct timing for assigning access cache timestamp (Chengen Du)
 - usb: ucsi: Fix ucsi->connector race (Hans de Goede)
