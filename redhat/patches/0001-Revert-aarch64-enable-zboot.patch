@@ -1,0 +1,36 @@
+From 584efff27c576271549580cbeff5051d31da38cb Mon Sep 17 00:00:00 2001
+From: "Justin M. Forbes" <jforbes@fedoraproject.org>
+Date: Fri, 31 Mar 2023 06:56:57 -0500
+Subject: [PATCH] Revert "aarch64: enable zboot"
+
+This reverts commit dad33deb775b0d5d5566bffcb8ec45b8f69734de.
+---
+ redhat/configs/common/generic/CONFIG_EFI_ZBOOT | 2 +-
+ redhat/kernel.spec.template                    | 4 ++--
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/redhat/configs/common/generic/CONFIG_EFI_ZBOOT b/redhat/configs/common/generic/CONFIG_EFI_ZBOOT
+index 6af193185a1e..dd98202456bb 100644
+--- a/redhat/configs/common/generic/CONFIG_EFI_ZBOOT
++++ b/redhat/configs/common/generic/CONFIG_EFI_ZBOOT
+@@ -1 +1 @@
+-CONFIG_EFI_ZBOOT=y
++# CONFIG_EFI_ZBOOT is not set
+diff --git a/redhat/kernel.spec.template b/redhat/kernel.spec.template
+index f3e7dc0889ec..f13dccdf88a9 100755
+--- a/redhat/kernel.spec.template
++++ b/redhat/kernel.spec.template
+@@ -502,8 +502,8 @@ Summary: The Linux kernel
+ %define all_arch_configs kernel-%{version}-aarch64*.config
+ %define asmarch arm64
+ %define hdrarch arm64
+-%define make_target vmlinuz.efi
+-%define kernel_image arch/arm64/boot/vmlinuz.efi
++%define make_target Image.gz
++%define kernel_image arch/arm64/boot/Image.gz
+ %endif
+
+ # Should make listnewconfig fail if there's config options
+-- 
+2.39.2
+
