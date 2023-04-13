@@ -1,3 +1,7 @@
+* Thu Apr 13 2023 Augusto Caringi <acaringi@redhat.com> [6.2.11-0]
+- Linux v6.2.11
+Resolves: 
+
 * Thu Apr 06 2023 Augusto Caringi <acaringi@redhat.com> [6.2.10-0]
 - fedora: arm: Enable DRM_PANEL_HIMAX_HX8394 (Peter Robinson)
 - arm64: dts: rk3399-pinephone-pro: Add touchscreen support (Martijn Braam)
