@@ -12,7 +12,9 @@ RHEL_MINOR = 99
 #
 # Use this spot to avoid future merge conflicts.
 # Do not trim this comment.
-RHEL_RELEASE = 0
+# RHEL_RELEASE = 0
+# Bump this to give more preference to this kernel over fedora packages
+RHEL_RELEASE = 600
 
 #
 # ZSTREAM
