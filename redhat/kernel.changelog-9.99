@@ -1,3 +1,10 @@
+* Thu May 11 2023 Justin M. Forbes <jforbes@fedoraproject.org> [6.2.15-0]
+- redhat: configs: generic: x86: Disable CONFIG_VIDEO_OV2740 for x86 platform (Kate Hsuan)
+- Add Bugs to be fixed in 6.2.15 (Justin M. Forbes)
+- xfs: verify buffer contents when we skip log replay (Darrick J. Wong)
+- Linux v6.2.15
+Resolves: 
+
 * Sun Apr 30 2023 Justin M. Forbes <jforbes@fedoraproject.org> [6.2.14-0]
 - Linux v6.2.14
 Resolves: 
