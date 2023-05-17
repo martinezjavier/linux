@@ -1,3 +1,8 @@
+* Wed May 17 2023 Justin M. Forbes <jforbes@fedoraproject.org> [6.2.16-0]
+- Fedora 36 is EOL (Justin M. Forbes)
+- Linux v6.2.16
+Resolves: 
+
 * Thu May 11 2023 Justin M. Forbes <jforbes@fedoraproject.org> [6.2.15-0]
 - redhat: configs: generic: x86: Disable CONFIG_VIDEO_OV2740 for x86 platform (Kate Hsuan)
 - Add Bugs to be fixed in 6.2.15 (Justin M. Forbes)
