@@ -80,5 +80,8 @@ drm_atomic_helper_damage_iter_next(struct drm_atomic_helper_damage_iter *iter,
 bool drm_atomic_helper_damage_merged(const struct drm_plane_state *old_state,
 				     struct drm_plane_state *state,
 				     struct drm_rect *rect);
+bool drm_atomic_helper_buffer_damage_merged(const struct drm_plane_state *old_state,
+					    struct drm_plane_state *state,
+					    struct drm_rect *rect);
 
 #endif

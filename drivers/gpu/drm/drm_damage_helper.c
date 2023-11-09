@@ -331,3 +331,37 @@ bool drm_atomic_helper_damage_merged(const struct drm_plane_state *old_state,
 	return valid;
 }
 EXPORT_SYMBOL(drm_atomic_helper_damage_merged);
+
+/**
+ * drm_atomic_helper_buffer_damage_merged - Merged buffer damage
+ * @old_state: Old plane state for validation.
+ * @state: Plane state from which to iterate the damage clips.
+ * @rect: Returns the merged buffer damage rectangle
+ *
+ * This function merges any valid buffer damage clips into one rectangle and
+ * returns it in @rect. It checks if the framebuffers attached to @old_state
+ * and @state are the same. If that is not the case then the returned damage
+ * rectangle is the &drm_plane_state.src, since a full update should happen.
+ *
+ * Note that &drm_plane_state.fb_damage_clips == NULL in plane state means that
+ * full plane update should happen. It also ensure helper iterator will return
+ * &drm_plane_state.src as damage.
+ *
+ * For details see: drm_atomic_helper_damage_iter_init() and
+ * drm_atomic_helper_damage_iter_next().
+ *
+ * Returns:
+ * True if there is valid buffer damage otherwise false.
+ */
+bool drm_atomic_helper_buffer_damage_merged(const struct drm_plane_state *old_state,
+					    struct drm_plane_state *state,
+					    struct drm_rect *rect)
+{
+	if (old_state->fb != state->fb) {
+		drm_property_blob_put(state->fb_damage_clips);
+		state->fb_damage_clips = NULL;
+	}
+
+	return drm_atomic_helper_damage_merged(old_state, state, rect);
+}
+EXPORT_SYMBOL(drm_atomic_helper_buffer_damage_merged);
