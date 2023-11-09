@@ -2909,6 +2909,16 @@ int vmw_du_helper_plane_update(struct vmw_du_update_plane *update)
 	int ret;
 
 	/*
+	 * Discard damage clips if the framebuffer attached to the plane state
+	 * has changed since the last plane update (page-flip). In this case a
+	 * full plane update should happen, since uploads are done per-buffer.
+	 */
+	if (old_state->fb != state->fb) {
+		drm_property_blob_put(state->fb_damage_clips);
+		state->fb_damage_clips = NULL;
+	}
+
+	/*
 	 * Iterate in advance to check if really need plane update and find the
 	 * number of clips that actually are in plane src for fifo allocation.
 	 */
