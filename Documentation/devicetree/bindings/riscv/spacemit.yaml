@@ -21,7 +21,12 @@ properties:
       - items:
           - enum:
               - bananapi,bpi-f3
+              - milkv,jupiter-k1
           - const: spacemit,k1
+      - items:
+          - enum:
+              - milkv,jupiter-m1
+          - const: spacemit,m1
 
 additionalProperties: true
 
